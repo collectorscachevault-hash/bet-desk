@@ -703,21 +703,22 @@ document.getElementById('app').innerHTML = "<link rel=\"preconnect\" href=\"http
   }
   // ---------- The $100 → $100K challenge: one weekly-card parlay a week, same state for everyone (worked out from the Record) ----------
   // Fresh start at `from` (owner's reset, 2026-10-09): a parlay counts only if every one of its games starts after that moment.
-  const CHAL = { start: 100, goal: 100000, steps: 11, max: 15, from: '2026-10-09T06:30:00Z' };
+  const CHAL = { start: 100, goal: 100000, steps: 11, max: 15, from: '2026-10-09T06:30:00Z', maxLegs: 3, minChance: 0.3 }; // any sport; 2-3 legs; only parlays the tool rates medium chance or better
   const chalFresh = (p) => p.legs.every((l) => Date.parse(l.start) > Date.parse(CHAL.from));
   const weekKey = (iso) => { const d = new Date(String(iso).slice(0, 10) + 'T12:00:00Z'); const day = (d.getUTCDay() + 6) % 7; d.setUTCDate(d.getUTCDate() - day); return d.toISOString().slice(0, 10); }; // Monday of that week
   const chMult = (c) => 1 / (c.cost || c.price), chChance = (c) => c.aiProb ?? c.fair ?? 0;
   const chalNeed = (bank, step, horizon) => Math.pow(CHAL.goal / bank, 1 / Math.max(1, horizon - step + 1));
-  // The parlay for a step: the best chance among those that pay enough to finish in 11 steps; else enough for 15; else the biggest payout
+  // The parlay for a step: the best chance among those that pay enough to finish in 11 steps; else enough for 15. Never a long shot: if nothing confident pays enough, it waits for the next card.
   function chalPick(cands, bank, step) {
-    const ok = cands.filter((c) => chMult(c) >= chalNeed(bank, step, CHAL.steps)), ok2 = cands.filter((c) => chMult(c) >= chalNeed(bank, step, CHAL.max));
-    const pool = ok.length ? ok : ok2.length ? ok2 : cands;
-    return pool.slice().sort((a, b) => (ok.length || ok2.length ? chChance(b) - chChance(a) : chMult(b) - chMult(a)) || a.id.localeCompare(b.id))[0] || null;
+    const sure = cands.filter((c) => chChance(c) >= CHAL.minChance);
+    const ok = sure.filter((c) => chMult(c) >= chalNeed(bank, step, CHAL.steps)), ok2 = sure.filter((c) => chMult(c) >= chalNeed(bank, step, CHAL.max));
+    const pool = ok.length ? ok : ok2;
+    return pool.slice().sort((a, b) => chChance(b) - chChance(a) || a.id.localeCompare(b.id))[0] || null;
   }
   const sharesLeg = (a, b) => a.legs.some((x) => b.legs.some((y) => x.ticker === y.ticker));
   function chalState() {
     const byWeek = {};
-    for (const p of allPicks()) if (p.src === 'weekly' && p.cat === 'parlay' && p.legs && p.legs.length >= 2 && p.legs.length <= 5 && p.day && chalFresh(p)) { const wk = weekKey(p.day); (byWeek[wk] ||= {})[p.day] = (byWeek[wk][p.day] || []).concat(p); }
+    for (const p of allPicks()) if (p.src === 'weekly' && p.cat === 'parlay' && p.legs && p.legs.length >= 2 && p.legs.length <= CHAL.maxLegs && p.day && chalFresh(p)) { const wk = weekKey(p.day); (byWeek[wk] ||= {})[p.day] = (byWeek[wk][p.day] || []).concat(p); }
     const S = { attempt: 1, bank: CHAL.start, step: 1, open: [], history: [], attempts: [], done: null, streak: 0, best: 0, bestAttempt: 0 };
     const endAttempt = (atStep) => { S.attempts.push({ n: S.attempt, reached: atStep - 1, peak: S.peak || CHAL.start }); S.attempt++; S.bank = CHAL.start; S.step = 1; S.streak = 0; S.peak = CHAL.start; };
     outer: for (const wk of Object.keys(byWeek).sort()) {
@@ -743,10 +744,10 @@ document.getElementById('app').innerHTML = "<link rel=\"preconnect\" href=\"http
     const stepsHit = S.step - 1; const segs = Array.from({ length: CHAL.steps }, (_, k) => `<i class="${k < stepsHit ? 'hit' : k < stepsHit + S.open.length ? 'live' : ''}"></i>`).join('');
     let h = `<div class="card" style="display:grid;gap:8px"><div class="row" style="justify-content:space-between;align-items:flex-end;gap:10px"><div><h3 style="margin:0">$100 → $100K challenge</h3><div class="hint">${S.done === 'won' ? 'Finished!' : `Step ${S.step} of ${CHAL.steps}${S.attempt > 1 ? ` · attempt ${S.attempt}` : ''}`} · each win rolls into the next parlay</div></div><div style="text-align:right"><div class="bigstat num" style="font-size:26px">${money(S.bank)}</div><div class="hint">bank</div></div></div>
       <div class="steps" aria-label="${stepsHit} of ${CHAL.steps} steps hit">${segs}</div>
-      <div class="hint">Needs about <b>${S.need.toFixed(2)}x</b> per step to finish in ${CHAL.steps}; anything over ${S.need15.toFixed(2)}x still finishes within ${CHAL.max}. Up to two parlays a week when the Thursday card has two good ones.</div>`;
+      <div class="hint">Needs about <b>${S.need.toFixed(2)}x</b> per step to finish in ${CHAL.steps}; anything over ${S.need15.toFixed(2)}x still finishes within ${CHAL.max}. Any sport, 2 or 3 legs, only parlays the tool rates a medium chance or better; it waits for the next card rather than take a long shot. Up to two parlays a week when the card has two good ones.</div>`;
     if (S.done === 'won') h += `<div class="banner"><b>Done: $100 turned into ${money(S.bank)}.</b></div>`;
     else if (S.open.length) h += `<div class="picks">${S.open.map((e) => parlayCard(e.pick, { title: `Step ${e.step} parlay`, who: 'Challenge', sub: `${e.ifHits ? `if step ${e.ifHits} hits, ` : ''}${money(e.bankBefore)} on it · wins ${money(e.bankBefore / (e.pick.cost || e.pick.price))}`, aiProb: e.pick.aiProb })).join('')}</div>`;
-    else h += `<div class="card empty" style="padding:12px"><strong>The next parlay arrives with the next weekly card</strong><span>Fresh start from ${esc(dayLabel(CHAL.from.slice(0, 10) + 'T12:00:00'))}: only parlays whose games were all still ahead count. It takes the parlay with the best chance that pays enough to stay on pace.</span></div>`;
+    else h += `<div class="card empty" style="padding:12px"><strong>The next parlay arrives with the next weekly card</strong><span>Fresh start from ${esc(dayLabel(CHAL.from.slice(0, 10) + 'T12:00:00'))}: only parlays whose games were all still ahead count. It takes the 2- or 3-leg parlay with the best chance that pays enough to stay on pace.</span></div>`;
     const rec = `<b>Closest so far: ${S.best} in a row</b>${S.best ? ` (attempt ${S.bestAttempt})` : ''}${S.attempts.length ? ` · ${S.attempts.length} attempt${S.attempts.length === 1 ? '' : 's'} ended` : ''} · current run ${S.streak}`;
     h += `<div class="hint" style="border-top:1px solid var(--line);padding-top:8px">${rec}</div>`;
     if (S.history.length) h += `<details><summary class="hint">Every step so far (${S.history.length})</summary><div style="display:grid;gap:4px;margin-top:6px">${S.history.slice().reverse().map((e) => `<div class="row" style="justify-content:space-between;gap:8px;font-size:13px"><span><span class="pill ${e.bankAfter ? 'won' : 'lost'}">${e.bankAfter ? 'hit' : 'missed'}</span> Step ${e.step}${e.attempt > 1 ? ` (attempt ${e.attempt})` : ''} · ${e.pick.legs.length}-leg · ${chMult(e.pick).toFixed(1)}x · ${esc(dayLabel(e.date + 'T12:00:00'))}</span><b class="num">${money(e.bankBefore)} → ${money(e.bankAfter)}</b></div>`).join('')}</div></details>`;
