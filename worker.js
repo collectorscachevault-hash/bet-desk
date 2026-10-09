@@ -1,6 +1,7 @@
 // Bet Desk website: serves the static files and answers two small live-data requests for the page.
 //   GET /api/prices?t=TICKER,...   (up to 100)  ->  { at, m: { TICKER: [yesAsk, yesBid, noAsk, open, result] | null } }
 //       open = 1 while the market can still be traded; result = "yes" | "no" | "" once settled; null = Kalshi does not list it.
+//   GET /api/injuries              ->  { at, season, week, players: { "kyler murray": { team, pos, status, injury, practice } } }  (nflverse's NFL injury report, latest week)
 //   GET /api/live-games            ->  { at, games: [{ league, id, state, clock, period, hs, as, pHome, done }] }  (games in progress or finished today, from ESPN)
 //   GET /api/live-stats?g=nfl:401...,nba:401...  (up to 12 games) -> { at, games: { "nfl:401...": { done, hs, as, players: { "ceedee lamb": { recYds: 54, rec: 4 } } } } }
 // Kalshi's public API refuses the shared addresses Cloudflare uses, so requests are signed with the owner's read-only key when
@@ -97,6 +98,21 @@ async function gameStats(league, id) {
   const v = { done: !!comp.status?.type?.completed, state: comp.status?.type?.state || '', detail: comp.status?.type?.shortDetail || '', hs: Number(home?.score ?? 0), as: Number(away?.score ?? 0), players };
   statCache.set(key, { at: Date.now(), v }); return v;
 }
+// NFL injury report from nflverse (free, updated through the week): { at, week, players: { "kyler murray": { team, pos, status, injury, practice } } }
+let injCache = null; // { at, v }
+const csvRows = (text) => { const rows = []; let row = [], f = '', q = false; for (let i = 0; i < text.length; i++) { const c = text[i]; if (q) { if (c === '"') { if (text[i + 1] === '"') { f += '"'; i++; } else q = false; } else f += c; } else if (c === '"') q = true; else if (c === ',') { row.push(f); f = ''; } else if (c === '\n') { row.push(f); rows.push(row); row = []; f = ''; } else if (c !== '\r') f += c; } if (f || row.length) { row.push(f); rows.push(row); } return rows; };
+async function injuries() {
+  if (injCache && Date.now() - injCache.at < 3600e3) return injCache.v;
+  const d = new Date(); const season = d.getUTCFullYear() - (d.getUTCMonth() < 2 ? 1 : 0); // January and February still belong to the previous season
+  const r = await fetch(`https://github.com/nflverse/nflverse-data/releases/download/injuries/injuries_${season}.csv`, { headers: { accept: 'text/csv' } });
+  if (!r.ok) throw new Error('nflverse ' + r.status);
+  const rows = csvRows(await r.text()); const H = rows.shift() || []; const col = (n) => H.indexOf(n);
+  const iw = col('week'), it = col('team'), ip = col('position'), inm = col('full_name'), ist = col('report_status'), ii = col('report_primary_injury'), ipr = col('practice_status'), ipi = col('practice_primary_injury'), ity = col('season_type');
+  let week = 0; for (const x of rows) if (x[ity] === 'REG') week = Math.max(week, Number(x[iw]) || 0);
+  const players = {};
+  for (const x of rows) { if (x[ity] !== 'REG' || Number(x[iw]) !== week) continue; const status = x[ist] || '', practice = x[ipr] || ''; if (!status && !practice) continue; players[normName(x[inm])] = { team: x[it], pos: x[ip], status, injury: x[ii] || x[ipi] || '', practice }; }
+  const v = { at: Date.now(), season, week, players }; injCache = { at: Date.now(), v }; return v;
+}
 const json = (o, status = 200) => Response.json(o, { status, headers: { 'cache-control': 'no-store' } });
 export default {
   async fetch(req, env) {
@@ -112,6 +128,7 @@ export default {
       const games = {}; await Promise.all(ids.map(async (k) => { try { const [lg, id] = k.split(':'); const v = await gameStats(lg, id); if (v) games[k] = v; } catch {} }));
       return json({ at: Date.now(), games });
     }
+    if (url.pathname === '/api/injuries') { try { return Response.json(await injuries(), { headers: { 'cache-control': 'public, max-age=1800' } }); } catch (e) { return json({ error: String(e.message || e) }, 502); } }
     if (url.pathname === '/api/live-games') { try { return json(await liveGames()); } catch (e) { return json({ error: String(e.message || e) }, 502); } }
     return env.ASSETS.fetch(req);
   },
