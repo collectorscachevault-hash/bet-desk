@@ -1,7 +1,8 @@
 // Bet Desk website: serves the static files and answers two small live-data requests for the page.
 //   GET /api/prices?t=TICKER,...   (up to 100)  ->  { at, m: { TICKER: [yesAsk, yesBid, noAsk, open, result] | null } }
 //       open = 1 while the market can still be traded; result = "yes" | "no" | "" once settled; null = Kalshi does not list it.
-//   GET /api/live-games            ->  { at, games: [{ league, id, state, clock, period, hs, as, pHome }] }  (games in progress, from ESPN)
+//   GET /api/live-games            ->  { at, games: [{ league, id, state, clock, period, hs, as, pHome, done }] }  (games in progress or finished today, from ESPN)
+//   GET /api/live-stats?g=nfl:401...,nba:401...  (up to 12 games) -> { at, games: { "nfl:401...": { done, hs, as, players: { "ceedee lamb": { recYds: 54, rec: 4 } } } } }
 // Kalshi's public API refuses the shared addresses Cloudflare uses, so requests are signed with the owner's read-only key when
 // KALSHI_KEY_ID and KALSHI_PRIVATE_KEY are set as secrets on this worker. The key can only read; it cannot place or change bets.
 const KALSHI = 'https://api.elections.kalshi.com';
@@ -60,7 +61,7 @@ async function liveGames() {
       const r = await fetch(`https://site.api.espn.com/apis/site/v2/sports/${sport}/scoreboard?limit=400${extra}`, { headers: { accept: 'application/json' } });
       if (!r.ok) return;
       for (const e of (await r.json()).events || []) {
-        const st = e.status?.type?.state; if (st !== 'in') continue;
+        const st = e.status?.type?.state; if (st !== 'in' && st !== 'post') continue;
         const c = e.competitions?.[0] || {}; const home = (c.competitors || []).find((x) => x.homeAway === 'home'), away = (c.competitors || []).find((x) => x.homeAway === 'away');
         const pr = c.situation?.lastPlay?.probability; const pHome = pr && pr.homeWinPercentage != null ? Math.round(pr.homeWinPercentage * 1000) / 1000 : null;
         games.push({ league, id: String(e.id), state: 'in', clock: e.status.displayClock || '', period: e.status.period || 0, detail: e.status.type?.shortDetail || '', hs: Number(home?.score ?? 0), as: Number(away?.score ?? 0), pHome, done: !!e.status.type?.completed });
@@ -68,6 +69,33 @@ async function liveGames() {
     } catch {}
   }));
   return (liveCache = { at: Date.now(), games });
+}
+// Player stats from ESPN's box score, keyed by a simplified player name, in the same stat names the page uses.
+const statCache = new Map(); // league:id -> { at, v }
+const normName = (n) => String(n || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().replace(/[^a-z ]/g, ' ').replace(/\b(jr|sr|ii|iii|iv)\b/g, '').replace(/\s+/g, ' ').trim();
+const n0 = (x) => { const v = Number(String(x ?? '').split(/[-/]/)[0]); return Number.isFinite(v) ? v : 0; };
+async function gameStats(league, id) {
+  const key = league + ':' + id, c = statCache.get(key); if (c && Date.now() - c.at < 30000) return c.v;
+  const [sport] = ESPN[league] || []; if (!sport) return null;
+  const r = await fetch(`https://site.api.espn.com/apis/site/v2/sports/${sport}/summary?event=${id}`, { headers: { accept: 'application/json' } }); if (!r.ok) return null;
+  const d = await r.json(); const players = {};
+  for (const team of d.boxscore?.players || []) for (const grp of team.statistics || []) {
+    const keys = grp.keys || [], name = grp.name || (keys.includes('atBats') ? 'batting' : keys.includes('earnedRuns') ? 'pitching' : '');
+    for (const a of grp.athletes || []) {
+      const nm = normName(a.athlete?.displayName); if (!nm) continue; const st = a.stats || []; const get = (k) => n0(st[keys.indexOf(k)]);
+      const P = (players[nm] ||= {});
+      if (name === 'passing') { P.passYds = get('passingYards'); P.passTD = get('passingTouchdowns'); }
+      else if (name === 'rushing') { P.rushYds = get('rushingYards'); P.rushTD = get('rushingTouchdowns'); }
+      else if (name === 'receiving') { P.rec = get('receptions'); P.recYds = get('receivingYards'); P.recTD = get('receivingTouchdowns'); }
+      else if (keys.includes('points') && keys.includes('rebounds')) { P.pts = get('points'); P.reb = get('rebounds'); P.ast = get('assists'); P.threes = get('threePointFieldGoalsMade-threePointFieldGoalsAttempted'); P.pra = P.pts + P.reb + P.ast; }
+      else if (name === 'batting') { P.hits = get('hits'); P.hr = get('homeRuns'); P.hrr = get('hits') + get('runs') + get('RBIs'); }
+      else if (name === 'pitching') { P.ks = get('strikeouts'); }
+    }
+  }
+  for (const P of Object.values(players)) { if (P.rushYds != null || P.recYds != null) P.rrYds = (P.rushYds || 0) + (P.recYds || 0); if (P.rushTD != null || P.recTD != null) P.anyTD = (P.rushTD || 0) + (P.recTD || 0); }
+  const comp = d.header?.competitions?.[0] || {}; const home = (comp.competitors || []).find((x) => x.homeAway === 'home'), away = (comp.competitors || []).find((x) => x.homeAway === 'away');
+  const v = { done: !!comp.status?.type?.completed, state: comp.status?.type?.state || '', detail: comp.status?.type?.shortDetail || '', hs: Number(home?.score ?? 0), as: Number(away?.score ?? 0), players };
+  statCache.set(key, { at: Date.now(), v }); return v;
 }
 const json = (o, status = 200) => Response.json(o, { status, headers: { 'cache-control': 'no-store' } });
 export default {
@@ -79,6 +107,11 @@ export default {
       try { return json({ at: Date.now(), m: await prices(env, list) }); } catch (e) { return json({ error: String(e.message || e) }, 502); }
     }
     if (url.pathname === '/api/health') return json({ ok: true, keyId: !!(env.KALSHI_KEY_ID || '').trim(), privateKey: !!(env.KALSHI_PRIVATE_KEY || '').trim() }); // never the values, only whether they are set
+    if (url.pathname === '/api/live-stats') {
+      const ids = [...new Set(String(url.searchParams.get('g') || '').split(',').map((x) => x.trim()).filter((x) => /^(nfl|cfb|nba|cbb|mlb):\d{5,12}$/.test(x)))].slice(0, 12);
+      const games = {}; await Promise.all(ids.map(async (k) => { try { const [lg, id] = k.split(':'); const v = await gameStats(lg, id); if (v) games[k] = v; } catch {} }));
+      return json({ at: Date.now(), games });
+    }
     if (url.pathname === '/api/live-games') { try { return json(await liveGames()); } catch (e) { return json({ error: String(e.message || e) }, 502); } }
     return env.ASSETS.fetch(req);
   },
