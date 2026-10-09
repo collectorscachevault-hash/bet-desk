@@ -24,7 +24,7 @@ document.getElementById('app').innerHTML = "<link rel=\"preconnect\" href=\"http
   // ---------- state ----------
   let db = null, dbState = 'loading';
   let owner = true; // only the owner sees and logs personal bets; shared viewers get everything else
-  let feed = {}, games = [], gameByKey = {}, mkt = {}, index = null, results = {};
+  let feed = {}, games = [], gameByKey = {}, mkt = {}, rowByT = {}, index = null, results = {};
   let research = {}, picklog = {}, genDocs = {}, bets = [], settings = { bankroll: null };
   let userCap = null, myId = null; const names = {}; // viewer identity and a cache of other people's display names
   let tab = store.get('tab', 'picks'), pickCat = store.get('pickCat', 'value');
@@ -64,7 +64,7 @@ document.getElementById('app').innerHTML = "<link rel=\"preconnect\" href=\"http
     const push = (row, kind, yesLabel, noLabel, model, extra = {}) => {
       for (const side of ['yes', 'no']) {
         const price = side === 'yes' ? row.ya : row.na;
-        if (price == null || price <= 0 || price >= 1) continue;
+        if (row.closed || price == null || price <= 0 || price >= 1) continue;
         const raw = row.fy == null || started ? null : side === 'yes' ? row.fy : 1 - row.fy;
         const form = extra.l10 && extra.l10[1] >= 5 ? (side === 'yes' ? extra.l10[0] : extra.l10[1] - extra.l10[0]) / extra.l10[1] : null;
         const espn = extra.espnYes == null ? null : side === 'yes' ? extra.espnYes : 1 - extra.espnYes;
@@ -85,12 +85,58 @@ document.getElementById('app').innerHTML = "<link rel=\"preconnect\" href=\"http
     return out;
   }
   function rebuild() {
-    games = []; gameByKey = {}; mkt = {};
+    games = []; gameByKey = {}; mkt = {}; rowByT = {};
     for (const id of index?.shards || []) for (const G of feed[id]?.games || []) { games.push(G); gameByKey[G.key] = G; }
     games.sort((a, b) => a.start.localeCompare(b.start));
-    for (const G of games) { try { G._e = entries(G); } catch (err) { G._e = []; console.warn('skipped a game', G.key, err); } }
+    for (const G of games) {
+      for (const v of Object.values(G.k || {})) for (const r of v) rowByT[r.t] = r;
+      for (const P of G.props || []) for (const ln of P.lines || []) rowByT[ln.t] = ln;
+      try { G._e = entries(G); } catch (err) { G._e = []; console.warn('skipped a game', G.key, err); }
+    }
   }
   const live = (pick) => mkt[pick.ticker + '|' + pick.side] || null;
+
+  // ---------- live prices (the shared website only): Kalshi is asked for just the bets on screen ----------
+  // The page's data file is rebuilt on a schedule; in between, window.BETDESK_LIVE names a small service that
+  // answers with current prices. Each refresh covers what is visible, so a view costs one or two calls.
+  const LIVE = window.BETDESK_LIVE || ''; const liveAt = {}; let liveStamp = null, liveBusy = false;
+  const liveClosed = (t) => !!rowByT[t]?.closed;
+  const closedOf = (p) => (p.legs ? p.legs.some((l) => liveClosed(l.ticker)) : liveClosed(p.ticker));
+  async function liveFetch(tickers, maxAge = 45000) {
+    if (!LIVE) return false;
+    const now = Date.now(), need = [...new Set(tickers)].filter((t) => rowByT[t] && now - (liveAt[t] || 0) > maxAge);
+    let changed = false;
+    for (let i = 0; i < need.length; i += 100) {
+      const chunk = need.slice(i, i + 100); let j;
+      try { const r = await fetch(LIVE + '?t=' + chunk.join(','), { cache: 'no-store' }); if (!r.ok) break; j = await r.json(); } catch { break; }
+      if (!j || !j.m) break;
+      for (const t of chunk) {
+        const row = rowByT[t]; if (!row || !(t in j.m)) continue; liveAt[t] = Date.now();
+        const v = j.m[t], was = [row.ya, row.yb, row.na, !!row.closed].join();
+        if (!v || !v[3]) { row.closed = true; if (v && v[4]) results[t] = v[4]; } // no longer tradable (started, settled or delisted)
+        else { row.closed = false; row.ya = v[0]; row.yb = v[1]; row.na = v[2]; }
+        if ([row.ya, row.yb, row.na, !!row.closed].join() !== was) changed = true;
+      }
+      liveStamp = Date.now();
+    }
+    if (changed) rebuild();
+    return changed;
+  }
+  function liveRefresh(force) {
+    if (!LIVE || liveBusy) return;
+    const keys = new Set();
+    document.querySelectorAll('[data-sheet],[data-addleg],[data-side]').forEach((el) => { if (el.closest('[hidden]')) return; const k = el.dataset.sheet || el.dataset.addleg || el.dataset.side; if (k) keys.add(k.split('|')[0]); });
+    for (const l of combo) keys.add(l.ticker);
+    if (!keys.size) return;
+    liveBusy = true;
+    liveFetch([...keys], force ? 0 : 45000).then((changed) => { liveBusy = false; if (changed) render(); else renderFresh(); }).catch((err) => { liveBusy = false; console.warn('live prices: refresh failed', err); });
+  }
+  if (LIVE) {
+    // whenever the page redraws (new tab, filter, game or player opened), the bets now on screen get checked
+    let liveT; new MutationObserver(() => { clearTimeout(liveT); liveT = setTimeout(() => liveRefresh(false), 250); }).observe(document.getElementById('app'), { childList: true, subtree: true });
+    setInterval(() => { if (document.visibilityState === 'visible') liveRefresh(true); }, 60000);
+    document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') liveRefresh(true); });
+  }
   const contractsFor = (amt, price) => Math.max(0, Math.floor(amt / (price + fee(price)))); // how many $1 contracts the money buys after Kalshi's fee
   const todayKey = () => { const d = new Date(); return new Intl.DateTimeFormat('en-CA', { timeZone: 'America/Los_Angeles', year: 'numeric', month: '2-digit', day: '2-digit' }).format(d); };
   function latestResearch() { const ids = Object.keys(research).sort(); return ids.length ? research[ids[ids.length - 1]] : null; }
@@ -246,8 +292,13 @@ document.getElementById('app').innerHTML = "<link rel=\"preconnect\" href=\"http
     return diverse(list, 14);
   }
   const GEN_WORDS = { likely: 'Safer: the legs most likely to hit.', sure: 'At least a 70% chance, ranked by payout.', value: 'Legs where Kalshi charges less than they are worth.', twox: 'Pays at least 2x after the fee.' };
-  function generateParlay() {
-    const cands = genCandidates(gen);
+  async function generateParlay() {
+    let cands = genCandidates(gen);
+    if (LIVE && cands.length) { // check Kalshi's current prices for the legs in play before choosing
+      genLast = { busy: true }; renderPicks();
+      const tk = [...new Set(cands.slice(0, 14).flatMap((c) => c.legs.map((l) => l.ticker)))];
+      if (await liveFetch(tk, 15000)) cands = genCandidates(gen);
+    }
     if (!cands.length) { genLast = { none: true }; return; }
     const fresh = cands.filter((c) => !genSeen.has(genSig(c)));
     const from = (fresh.length ? fresh : cands).slice(0, 5);
@@ -277,7 +328,8 @@ document.getElementById('app').innerHTML = "<link rel=\"preconnect\" href=\"http
       <div class="row" style="gap:8px;flex-wrap:wrap">${seg('When', 'when', [['today', 'Today only'], ['any', 'Any day this week']])}${seg('Legs', 'n', [[2, '2 legs'], [3, '3'], [4, '4'], [5, '5']])}</div>
       ${seg('Style', 'style', [['likely', 'Safer'], ['sure', '70%+ sure'], ['value', 'Best value'], ['twox', 'Pays 2x+']])}<p class="hint">${GEN_WORDS[gen.style]}</p>
       <button class="btn primary" data-gen style="width:100%">${genLast?.c ? 'Generate another' : 'Generate parlay'}</button></div>`;
-    if (genLast?.none) h += `<div class="card empty"><strong>Nothing fits those settings right now</strong><span>Try more legs, another style, "Any day this week", or turn on player bets.</span></div>`;
+    if (genLast?.busy) h += `<div class="card empty"><strong>Checking live prices…</strong><span>Making sure every leg can still be bought.</span></div>`;
+    else if (genLast?.none) h += `<div class="card empty"><strong>Nothing fits those settings right now</strong><span>Try more legs, another style, "Any day this week", or turn on player bets.</span></div>`;
     else if (genLast?.c) { const c = genLast.c; h += `<div class="picks">${parlayCard(c, { head: `<b>Fresh parlay · ${pct(c.fair)} chance · pays about ${(1 / c.price).toFixed(1)}x</b><span>${db || window.BETDESK_BOX ? (genLast.saved === true ? 'Saved to the shared Track record.' : genLast.saved === false ? 'Could not save it to the tracker. If you were given view-only access, ask the owner to make you a contributor.' : 'Saving to the tracker…') : 'Not saved on this copy.'} ${GEN_WORDS[gen.style]}</span>` })}</div>`; }
     return h;
   }
@@ -323,7 +375,7 @@ document.getElementById('app').innerHTML = "<link rel=\"preconnect\" href=\"http
     const espn = p.espn ?? null;
     return `<article class="pick${ai ? ' ai' : ''}">
       ${head ? `<div class="pick-head">${head}</div>` : ''}
-      <div class="pick-meta"><span><span class="lg">${esc(LG[p.league]?.label || '')}</span> · ${esc(p.gameLabel)} · ${esc(whenOf(p.start))}</span><span>${ai ? '<span class="pill ai">AI researcher</span> ' : ''}${confPill(ai && p.aiProb ? p.aiProb : (live(p)?.fair ?? p.fair))}</span></div>
+      <div class="pick-meta"><span><span class="lg">${esc(LG[p.league]?.label || '')}</span> · ${esc(p.gameLabel)} · ${esc(whenOf(p.start))}</span><span>${ai ? '<span class="pill ai">AI researcher</span> ' : ''}${confPill(ai && p.aiProb ? p.aiProb : (live(p)?.fair ?? p.fair))}${closedOf(p) ? ' <span class="pill lost">Closed on Kalshi</span>' : ''}</span></div>
       <div class="pick-main"><div class="what"><b>${esc(p.label)}</b><span>${p.model === 'stats' || p.kind === 'prop' ? 'From the player’s recent games' : 'Compared with DraftKings’ price'}</span></div>
         <button class="buy" data-sheet="${esc(p.ticker + '|' + p.side)}" aria-label="Buy ${p.side} at ${cents(price)}: ${esc(p.label)}"><span class="s">Buy ${p.side}</span><span class="p num">${cents(price)}</span></button></div>
       <div class="facts-inline"><span>Chance it wins: <b>${pct(ai && p.aiProb ? p.aiProb : fair)}</b>${ai && p.aiProb ? ` <span class="hint">(math says ${pct(fair)})</span>` : ''}</span>${espn != null ? `<span>ESPN's model: <b>${pct(espn)}</b></span>` : ''}${edge != null ? `<span>${Math.round(edge * 100) > 0 ? `Price: <b class="pos">${Math.round(edge * 100)}¢ cheaper</b> than it's worth` : Math.round(edge * 100) < 0 ? `Price: <b class="neg">${-Math.round(edge * 100)}¢ more</b> than it's worth` : 'Price: <b>about fair</b>'}</span>` : ''}<span>Pays <b>${price ? (1 / price).toFixed(1) : '—'}x</b></span>${moved ? `<span class="hint">Was ${cents(p.price)} when picked</span>` : ''}</div>
@@ -338,7 +390,7 @@ document.getElementById('app').innerHTML = "<link rel=\"preconnect\" href=\"http
     const shown = opts.aiProb ?? fair;
     return `<article class="pick${opts.ai ? ' ai' : ''}">
       ${opts.head ? `<div class="pick-head">${opts.head}</div>` : ''}
-      <div class="pick-meta"><span>${legs.length}-leg parlay${legs.length >= 6 ? ' · moonshot' : ''}</span><span>${opts.ai ? '<span class="pill ai">AI researcher</span>' : '<span class="pill low">math</span>'}</span></div>
+      <div class="pick-meta"><span>${legs.length}-leg parlay${legs.length >= 6 ? ' · moonshot' : ''}</span><span>${opts.ai ? '<span class="pill ai">AI researcher</span>' : '<span class="pill low">math</span>'}${closedOf(c) ? ' <span class="pill lost">A leg has closed</span>' : ''}</span></div>
       <div class="legs-list">${legs.map((l) => `<button class="leg-row" data-sheet="${esc(l.key || l.ticker + '|' + l.side)}"><span class="n"><b>${esc(l.label)}</b><span>${esc(LG[l.league]?.label || '')} · ${esc(l.gameLabel || '')} · ${esc(l.start ? whenOf(l.start) : '')}</span></span><span class="num">${cents(l.price)}<span class="hint"> · ${pct(l.fair)}</span></span></button>`).join('')}</div>
       <div class="facts-inline"><span>Chance all win: <b>${pct(shown, shown < 0.1 ? 1 : 0)}</b>${shown ? ` <span class="hint">(about 1 in ${Math.max(1, Math.round(1 / shown))})</span>` : ''}</span><span>Pays about <b>${price ? Math.round(1 / price) : '—'}x</b></span><span>Worth buying up to <b>${fair ? cents(worthUpTo(fair)) : '—'}</b></span></div>
       ${opts.reason ? `<p class="why">${esc(opts.reason)}</p>` : ''}
@@ -1324,6 +1376,7 @@ document.getElementById('app').innerHTML = "<link rel=\"preconnect\" href=\"http
   // ---------- shell ----------
   function renderFresh() {
     const u = index?.updatedAt;
+    if (LIVE && liveStamp) { $('fresh').textContent = `Live Kalshi prices · checked ${new Date(liveStamp).toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' })}`; return; }
     $('fresh').textContent = u ? `Prices from ${new Date(u).toLocaleString(undefined, { weekday: 'short', hour: 'numeric', minute: '2-digit' })} · refresh ~8 AM, 1 PM, 4 PM` : dbState === 'off' ? 'Not connected' : 'Loading…';
   }
   function render() {
@@ -1362,7 +1415,7 @@ document.getElementById('app').innerHTML = "<link rel=\"preconnect\" href=\"http
     const sl = t.closest('[data-slot]'); if (sl) { slot = sl.dataset.slot; store.set('slot', slot); render(); return; }
     const lgN = t.closest('[data-legs]'); if (lgN) { legsN = lgN.dataset.legs === 'moon' ? 'moon' : Number(lgN.dataset.legs); store.set('legsN', legsN); renderPicks(); return; }
     const gop = t.closest('[data-genopt]'); if (gop) { const [k, v] = gop.dataset.genopt.split(':'); gen[k] = k === 'n' ? Number(v) : v; store.set('gen', gen); genLast = null; renderPicks(); return; }
-    const gb = t.closest('[data-gen]'); if (gb) { generateParlay(); renderPicks(); const card = document.querySelector('#p-picks .pick'); if (card) card.scrollIntoView({ behavior: 'smooth', block: 'center' }); return; }
+    const gb = t.closest('[data-gen]'); if (gb) { generateParlay().then(() => { renderPicks(); const card = document.querySelector('#p-picks .pick'); if (card) card.scrollIntoView({ behavior: 'smooth', block: 'center' }); }); return; }
     const hf = t.closest('[data-histf]'); if (hf) { store.set('histF', hf.dataset.histf); renderRecord(); return; }
     const rv = t.closest('[data-rview]'); if (rv) { recordView = rv.dataset.rview; store.set('recordView', recordView); renderRecord(); return; }
     const rr = t.closest('[data-rrange]'); if (rr) { hitRange = rr.dataset.rrange; store.set('hitRange', hitRange); renderRecord(); return; }
@@ -1402,7 +1455,7 @@ document.getElementById('app').innerHTML = "<link rel=\"preconnect\" href=\"http
     const B = await loadBundle();
     if (B && B.feed) {
       dbState = 'on'; owner = false;
-      $('sharedNote').textContent = `Shared copy of Bet Desk, last updated ${new Date(B.builtAt).toLocaleString(undefined, { weekday: 'short', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' })}. Prices move, so check the live price in Kalshi before you buy.`;
+      $('sharedNote').textContent = LIVE ? `Shared copy of Bet Desk. Picks and research were last rebuilt ${new Date(B.builtAt).toLocaleString(undefined, { weekday: 'short', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' })}; prices come live from Kalshi for whatever is on screen, so a bet that has closed drops off.` : `Shared copy of Bet Desk, last updated ${new Date(B.builtAt).toLocaleString(undefined, { weekday: 'short', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' })}. Prices move, so check the live price in Kalshi before you buy.`;
       $('sharedNote').hidden = false; $('t-mine').hidden = true;
       if (tab === 'mine') setTab('picks');
       applyBundle(B);
