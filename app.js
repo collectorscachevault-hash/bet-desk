@@ -345,7 +345,7 @@ document.getElementById('app').innerHTML = "<link rel=\"preconnect\" href=\"http
   // ---------- "Generate a parlay": a fresh one on the spot, only from bets you can still place ----------
   const outcomeKey = (e) => (e.kind === 'winner' && e.team ? e.game + '|win|' + (e.side === 'yes' ? e.team : e.team === 'home' ? 'away' : 'home') : e.ticker);
   const genSig = (c) => c.legs.map(outcomeKey).sort().join();
-  let gen = Object.assign({ league: 'mix', when: 'today', n: 'any', min: 2, style: 'likely' }, store.get('gen', {})), genLast = null;
+  let gen = Object.assign({ league: 'mix', when: 'today', n: 'any', min: 1.5, minLeg: 0.55, style: 'likely' }, store.get('gen', {})), genLast = null;
   const genSeen = new Set();
   const r3p = (x) => (x == null ? null : Math.round(x * 1000) / 1000);
   function genPool(o) {
@@ -375,15 +375,21 @@ document.getElementById('app').innerHTML = "<link rel=\"preconnect\" href=\"http
     return out;
   }
   function genCandidates(o) {
-    const pool = genPool(o), M = Number(o.min) || 1.5, sizes = o.n === 'any' || !o.n ? [2, 3, 4, 5] : [Number(o.n)], out = new Map();
+    const minLeg = Number(o.minLeg) || 0; // every leg must have at least this chance
+    const pool = genPool(o).filter((e) => e.fair >= minLeg), M = Number(o.min) || 1.5, sizes = o.n === 'any' || !o.n ? [2, 3, 4, 5] : [Number(o.n)], out = new Map();
     const add = (c) => { if (1 / c.price < M) return; const sig = genSig(c); if (!out.has(sig)) out.set(sig, c); };
     const { legs, sc } = prepLegs(pool, 'likely');
+    // big cards: rank legs purely by how sure they are (one per game), since the point is stacking many likely legs
+    const perG = {}; const sureLegs = pool.filter((e) => e.price <= 0.95).sort((a, b) => b.fair - a.fair).filter((e) => (perG[e.game] = (perG[e.game] || 0) + 1) <= 1).slice(0, 60);
     for (const n of sizes) {
+      if (n > 6) { if (sureLegs.length >= n) for (const b of beamParlays(sureLegs, n, (e) => Math.log(e.fair), 40)[n - 1] || []) add(toParlay(sureLegs, b)); continue; }
       if (legs.length >= n) for (const b of beamParlays(legs, n, sc, 140)[n - 1] || []) add(toParlay(legs, b));
       for (const c of multCandidates(pool, n, M)) add(c);
     }
     return diverse([...out.values()].sort((a, b) => b.fair - a.fair), 14);
   }
+  // how many different games are open for a card right now (each leg of a card comes from a different game)
+  const genGamesOpen = (o) => new Set(genPool(o).filter((e) => e.fair >= (Number(o.minLeg) || 0)).map((e) => e.game)).size;
   async function generateParlay() {
     let cands = genCandidates(gen);
     if (LIVE && cands.length) { // check Kalshi's current prices for the legs in play before choosing
@@ -404,7 +410,7 @@ document.getElementById('app').innerHTML = "<link rel=\"preconnect\" href=\"http
     const sig = c.legs.map((l) => l.key).sort().join();
     const legs = c.legs.map((l) => ({ ticker: l.ticker, side: l.side, label: l.label, gameLabel: l.gameLabel, league: l.league, start: l.start, price: l.price, fair: r3p(l.fair), raw: r3p(l.raw), res: null }));
     const lgs = new Set(legs.map((l) => l.league));
-    const pick = { id: ('gen-' + sig).slice(0, 180), src: 'gen', cat: 'generated', conf: confOf(c.fair).cls, league: lgs.size === 1 ? [...lgs][0] : 'mixed', game: null, gameLabel: legs.map((l) => l.gameLabel).join(' + '), start: legs.map((l) => l.start).sort().pop(), side: 'yes', label: legs.map((l) => l.label).join(' + '), kind: 'combo', price: r3p(c.price), cost: r3p(c.cost), fair: r3p(c.fair), edge: r3p(c.fair - c.cost), legs, at: new Date().toISOString(), res: null, gen: { league: gen.league, when: gen.when, min: gen.min, n: gen.n } };
+    const pick = { id: ('gen-' + sig).slice(0, 180), src: 'gen', cat: 'generated', conf: confOf(c.fair).cls, league: lgs.size === 1 ? [...lgs][0] : 'mixed', game: null, gameLabel: legs.map((l) => l.gameLabel).join(' + '), start: legs.map((l) => l.start).sort().pop(), side: 'yes', label: legs.map((l) => l.label).join(' + '), kind: 'combo', price: r3p(c.price), cost: r3p(c.cost), fair: r3p(c.fair), edge: r3p(c.fair - c.cost), legs, at: new Date().toISOString(), res: null, gen: { league: gen.league, when: gen.when, min: gen.min, minLeg: gen.minLeg, n: gen.n } };
     const id = todayKey() + '-' + Date.now().toString(36);
     if (db) { await db.collection('gen').doc(id).set({ date: todayKey(), by: myId, picks: [pick] }); return; }
     // the shared website: hand it to the mailbox, which the daily jobs empty into the tracker
@@ -417,16 +423,17 @@ document.getElementById('app').innerHTML = "<link rel=\"preconnect\" href=\"http
     const chips = (key, opts) => `<div class="chips" role="group">${opts.map(([k, l]) => `<button class="chip" data-genopt="${key}:${k}" aria-pressed="${String(gen[key]) === String(k)}">${l}</button>`).join('')}</div>`;
     const seg = (name, key, opts) => `<div class="seg small" role="group" aria-label="${name}">${opts.map(([k, l]) => `<button data-genopt="${key}:${k}" aria-pressed="${String(gen[key]) === String(k)}">${l}</button>`).join('')}</div>`;
     const saved = db || window.BETDESK_BOX;
-    let h = `<div class="card" style="display:grid;gap:10px"><h3>Generate a parlay</h3><p class="hint">Pick the sports, the time frame and the smallest payout you want. It builds the parlay it is most confident in that fits, from bets you can still place.${saved ? ' Each one is saved to the Record.' : ''}</p>
+    let h = `<div class="card" style="display:grid;gap:10px"><h3>Generate a parlay</h3><p class="hint">Pick the sports, the time frame, how sure each leg must be, the smallest payout, and how many legs. It builds the card it is most confident in that fits, one leg per game, from bets you can still place.${saved ? ' Each one is saved to the Record.' : ''}</p>
       ${window.BETDESK_BOX ? `<label class="f">Your name (shown next to your parlays in the Record)<input class="in" data-genname placeholder="e.g. Luis" value="${esc(genName())}" autocomplete="name"></label>` : ''}
       <div><div class="hint" style="margin-bottom:4px">Sports</div>${chips('league', [['mix', 'Mix'], ...lgs.map((k) => [k, LG[k].label])])}</div>
       <div><div class="hint" style="margin-bottom:4px">When</div>${seg('When', 'when', [['today', 'Today'], ['any', 'This week']])}</div>
       <div><div class="hint" style="margin-bottom:4px">Pays at least</div>${chips('min', GEN_MULTS)}</div>
-      <div><div class="hint" style="margin-bottom:4px">Legs</div>${seg('Legs', 'n', [['any', 'Any'], [2, '2'], [3, '3'], [4, '4'], [5, '5']])}</div>
+      <div><div class="hint" style="margin-bottom:4px">Each leg at least</div>${chips('minLeg', [[0.55, '55% sure'], [0.65, '65%'], [0.75, '75%'], [0.85, '85%']])}</div>
+      <div><div class="hint" style="margin-bottom:4px">Legs <span class="hint">· ${genGamesOpen(gen)} games open for a card right now</span></div>${chips('n', [['any', 'Any'], [2, '2'], [3, '3'], [4, '4'], [5, '5'], [6, '6'], [8, '8'], [10, '10'], [12, '12'], [15, '15'], [20, '20']])}</div>
       <button class="btn primary" data-gen style="width:100%">${genLast?.c ? 'Generate another' : 'Generate parlay'}</button></div>`;
     if (genLast?.busy) h += `<div class="card empty"><strong>Checking live prices…</strong><span>Making sure every leg can still be bought.</span></div>`;
-    else if (genLast?.none) h += `<div class="card empty"><strong>Nothing fits those settings right now</strong><span>Try a smaller payout, more legs, “This week”, or more sports.</span></div>`;
-    else if (genLast?.c) { const c = genLast.c; h += `<div class="picks">${parlayCard(c, { title: 'Fresh parlay', who: 'Generated', sub: saved ? (genLast.saved === true ? 'saved to the Record' : genLast.saved === false ? 'could not be saved' : 'saving…') : 'not saved on this copy' })}</div>`; }
+    else if (genLast?.none) h += `<div class="card empty"><strong>Nothing fits those settings right now</strong><span>${gen.n !== 'any' && Number(gen.n) > genGamesOpen(gen) ? `Only ${genGamesOpen(gen)} games are open with legs that sure, and a card needs one game per leg. Try fewer legs, a lower “each leg” bar, or “This week”.` : 'Try a smaller payout, a lower “each leg” bar, “This week”, or more sports.'}</span></div>`;
+    else if (genLast?.c) { const c = genLast.c; h += `<div class="picks">${parlayCard(c, { title: `Fresh ${c.legs.length}-leg card`, who: `Generated · every leg ${pct(Math.min(...c.legs.map((l) => l.fair)))}+`, sub: saved ? (genLast.saved === true ? 'saved to the Record' : genLast.saved === false ? 'could not be saved' : 'saving…') : 'not saved on this copy' })}</div>`; }
     return h;
   }
   // Highest-chance parlay that pays at least 50x (costs 2¢ or less)
@@ -1671,7 +1678,7 @@ document.getElementById('app').innerHTML = "<link rel=\"preconnect\" href=\"http
     const sp = t.closest('[data-sport]'); if (sp) { sport = sp.dataset.sport; store.set('sport', sport); render(); return; }
     const sl = t.closest('[data-slot]'); if (sl) { slot = sl.dataset.slot; store.set('slot', slot); render(); return; }
     const lgN = t.closest('[data-legs]'); if (lgN) { legsN = lgN.dataset.legs === 'moon' ? 'moon' : Number(lgN.dataset.legs); store.set('legsN', legsN); renderPicks(); return; }
-    const gop = t.closest('[data-genopt]'); if (gop) { const [k, v] = gop.dataset.genopt.split(':'); gen[k] = (k === 'n' && v !== 'any') || k === 'min' ? Number(v) : v; store.set('gen', gen); genLast = null; renderParlaysTab(); return; }
+    const gop = t.closest('[data-genopt]'); if (gop) { const [k, v] = gop.dataset.genopt.split(':'); gen[k] = (k === 'n' && v !== 'any') || k === 'min' || k === 'minLeg' ? Number(v) : v; store.set('gen', gen); genLast = null; renderParlaysTab(); return; }
     const ib = t.closest('[data-ibet]'); if (ib) { toggleMine(JSON.parse(ib.dataset.ibet), ib.dataset.ibetTitle); render(); return; }
     const pv = t.closest('[data-pview]'); if (pv) { parlaysView = pv.dataset.pview; store.set('parlaysView', parlaysView); if (tab !== 'parlays') setTab('parlays'); else renderParlaysTab(); window.scrollTo({ top: 0 }); return; }
     const plc = t.closest('[data-plist]'); if (plc) { pickList = plc.dataset.plist; store.set('pickList', pickList); renderPicks(); return; }
