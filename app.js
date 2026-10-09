@@ -1030,7 +1030,8 @@ document.getElementById('app').innerHTML = "<link rel=\"preconnect\" href=\"http
     return { n: g.length, w, l: g.length - w, profit, roi: g.length ? profit / (10 * g.length) : 0, exp, pending: list.filter((p) => !p.res).length };
   }
   // ---------- hit rates (by number of legs and by sport) ----------
-  let recordView = store.get('recordView', 'hits'), hitRange = store.get('hitRange', 'all'), hitSrc = store.get('hitSrc', 'all');
+  let recordView = store.get('recordView', 'parlays'); if (recordView !== 'parlays' && recordView !== 'all') recordView = 'parlays';
+  let hitRange = store.get('hitRange', 'all'), hitSrc = store.get('hitSrc', 'all');
   const LEG_PREFIX = [['KXNCAAMB', 'cbb'], ['KXNCAAF', 'cfb'], ['KXNFL', 'nfl'], ['KXNBA', 'nba'], ['KXMLB', 'mlb']];
   const legLeague = (l) => l.league || (LEG_PREFIX.find(([p]) => (l.ticker || '').startsWith(p)) || [])[1] || 'other';
   const nLegs = (p) => (p.legs ? p.legs.length : 1);
@@ -1156,6 +1157,12 @@ document.getElementById('app').innerHTML = "<link rel=\"preconnect\" href=\"http
     const ids = [...new Set(ps.map((p) => p.by).filter((x) => x && names[x] == null))]; if (!ids.length) return;
     userCap.profiles(ids).then((ps2) => { let any = false; for (const id of ids) { const n = ps2[id]?.name || ''; if (names[id] !== n) { names[id] = n; any = true; } } if (any && tab === 'record') renderRecord(); }).catch(() => {});
   }
+  function histRow(p) {
+    const [who, cls] = p.src === 'gen' ? [genWho(p), 'medium'] : WHO[p.src] || [p.src, 'low']; const ch = chanceOf(p);
+    return `<div class="hrow"><div class="row" style="gap:6px"><span class="pill ${p.res || 'pending'}">${p.res === 'won' ? '✓ hit' : p.res === 'lost' ? '✗ missed' : p.res === 'void' ? 'void' : 'waiting'}</span><span class="pill ${cls}">${who}</span>${p.legs ? `<span class="hint">${p.legs.length}-leg parlay</span>` : ''}</div>
+        ${p.legs ? `<div class="hl">${p.legs.map((l) => `<span class="lg ${l.res || ''}">${l.res === 'won' ? '✓' : l.res === 'lost' ? '✗' : '·'} ${esc(l.label)}<i>${esc(l.gameLabel || '')}</i></span>`).join('')}</div>` : `<b>${esc(p.label)}</b><div class="hint">${esc(LG[p.league]?.label || '')} · ${esc(p.gameLabel || '')} · ${esc(timeOf(p.start))}</div>`}
+        <div class="hint">${cents(p.price)} · chance ${pct(ch)} · ${p.res === 'won' || p.res === 'lost' ? `<b class="${pickProfit(p) > 0 ? 'pos' : 'neg'}">${money(pickProfit(p), true)}</b> on $10` : `pays about ${(1 / p.price).toFixed(1)}x · $10 would win ${money(10 * (1 / (p.cost || p.price) - 1))}`}</div></div>`;
+  }
   function renderHistory(ps) {
     const f = store.get('histF', 'all');
     const list = ps.filter((p) => f === 'all' || (f === 'parlays' && p.legs) || (f === 'singles' && !p.legs) || (f === 'gen' && p.src === 'gen')).sort((a, b) => (b.start || '').localeCompare(a.start || '')).slice(0, 250);
@@ -1167,10 +1174,7 @@ document.getElementById('app').innerHTML = "<link rel=\"preconnect\" href=\"http
     let last = '';
     for (const p of list) {
       const dl = dayLabel(p.start); if (dl !== last) { if (last) h += '</div>'; h += `<div class="day"><h3>${esc(dl)}</h3>`; last = dl; }
-      const [who, cls] = p.src === 'gen' ? [genWho(p), 'medium'] : WHO[p.src] || [p.src, 'low']; const ch = chanceOf(p);
-      h += `<div class="hrow"><div class="row" style="gap:6px"><span class="pill ${p.res || 'pending'}">${p.res === 'won' ? '✓ hit' : p.res === 'lost' ? '✗ missed' : p.res === 'void' ? 'void' : 'waiting'}</span><span class="pill ${cls}">${who}</span>${p.legs ? `<span class="hint">${p.legs.length}-leg parlay</span>` : ''}</div>
-        ${p.legs ? `<div class="hl">${p.legs.map((l) => `<span class="lg ${l.res || ''}">${l.res === 'won' ? '✓' : l.res === 'lost' ? '✗' : '·'} ${esc(l.label)}<i>${esc(l.gameLabel || '')}</i></span>`).join('')}</div>` : `<b>${esc(p.label)}</b><div class="hint">${esc(LG[p.league]?.label || '')} · ${esc(p.gameLabel || '')} · ${esc(timeOf(p.start))}</div>`}
-        <div class="hint">${cents(p.price)} · chance ${pct(ch)} · ${p.res === 'won' || p.res === 'lost' ? `<b class="${pickProfit(p) > 0 ? 'pos' : 'neg'}">${money(pickProfit(p), true)}</b> on $10` : `pays about ${(1 / p.price).toFixed(1)}x`}</div></div>`;
+      h += histRow(p);
     }
     if (last) h += '</div>';
     return h;
@@ -1178,31 +1182,29 @@ document.getElementById('app').innerHTML = "<link rel=\"preconnect\" href=\"http
   function renderRecord() {
     const el = $('p-record');
     const ps = allPicks();
-    let html = `<div style="display:grid;gap:6px"><h2>Track record</h2><p class="lede">Every pick the tool makes is saved and checked against the final result. Profit assumes $10 on every pick, so you can see whether following it would have made money.</p></div>`;
-    html += `<div class="seg" role="group" aria-label="View">${[['hits', 'Hit rates'], ['history', 'History'], ['details', 'Money & details']].map(([k, l]) => `<button data-rview="${k}" aria-pressed="${recordView === k}">${l}</button>`).join('')}</div>`;
-    if (!ps.length) { html += `<div class="card empty"><strong>${dbState === 'on' ? 'No picks graded yet' : 'Loading…'}</strong><span>Picks are saved each time prices refresh and graded a few hours after each game ends. Give it a few days. A fair verdict needs 100+ graded picks.</span></div>`; el.innerHTML = html; return; }
-    if (recordView === 'hits') { html += renderHitRates(ps); el.innerHTML = html; return; }
-    if (recordView === 'history') { html += renderHistory(ps); el.innerHTML = html; return; }
-    const all = statsOf(ps);
+    let html = `<div style="display:grid;gap:6px"><h2>Track record</h2><p class="lede">Every parlay the tool picked or someone generated, and whether it hit. Money assumes $10 on each one, after Kalshi's fee.</p></div>`;
+    html += `<div class="seg" role="group" aria-label="View">${[['parlays', 'Parlays'], ['all', 'Everything']].map(([k, l]) => `<button data-rview="${k}" aria-pressed="${recordView === k}">${l}</button>`).join('')}</div>`;
+    if (!ps.length) { html += `<div class="card empty"><strong>${dbState === 'on' ? 'Nothing graded yet' : 'Loading…'}</strong><span>Parlays are saved when they are picked or generated and marked won or lost a few hours after the last game ends.</span></div>`; el.innerHTML = html; return; }
+    if (recordView === 'all') { html += renderHistory(ps); el.innerHTML = html; return; }
+    const par = ps.filter((p) => p.legs && p.legs.length > 1);
+    const all = statsOf(par);
     html += `<div class="tiles three">
-      <div class="tile"><span class="k">Picks graded</span><span class="v num">${all.n}</span><span class="e">${all.pending} waiting on results</span></div>
-      <div class="tile"><span class="k">Won</span><span class="v num">${all.n ? pct(all.w / all.n) : '—'}</span><span class="e">${all.w}–${all.l}${all.n ? ` · expected ${pct(all.exp / all.n)}` : ''}</span></div>
-      <div class="tile"><span class="k">$10 on every pick</span><span class="v num ${all.profit > 0 ? 'pos' : all.profit < 0 ? 'neg' : ''}">${money(all.profit, true)}</span><span class="e">${all.n ? `${all.roi >= 0 ? '+' : '−'}${pct(Math.abs(all.roi), 1)} return` : 'shows once games finish'}</span></div>
+      <div class="tile"><span class="k">Parlays won</span><span class="v num pos">${all.w}</span><span class="e">${all.l} lost · ${all.pending} waiting</span></div>
+      <div class="tile"><span class="k">Hit rate</span><span class="v num">${all.n ? pct(all.w / all.n) : '—'}</span><span class="e">${all.n} finished</span></div>
+      <div class="tile"><span class="k">$10 on every parlay</span><span class="v num ${all.profit > 0 ? 'pos' : all.profit < 0 ? 'neg' : ''}">${all.n ? money(all.profit, true) : '—'}</span><span class="e">${all.n ? `${money(10 * all.n)} bet in all` : 'no results yet'}</span></div>
     </div>`;
-    const graded = ps.filter((p) => p.res === 'won' || p.res === 'lost').sort((a, b) => (a.gradedAt || a.start).localeCompare(b.gradedAt || b.start));
-    if (graded.length >= 3) html += `<div class="card chart"><h3>Running total, $10 per pick</h3><div class="legend"><span><i></i>Math</span><span><i class="ai"></i>AI researcher</span></div>${chart(graded)}</div>`;
-    const groups = [['Generated parlays (you and friends)', ps.filter((p) => p.src === 'gen')], ['AI researcher (daily)', ps.filter((p) => p.src === 'ai' && !p.legs)], ['Math: price gaps (team bets)', ps.filter((p) => p.src === 'math' && !['combo', 'auto', 'plan', 'shadow'].includes(p.cat) && p.kind !== 'prop')], ['Math: player stats', ps.filter((p) => p.src === 'math' && p.kind === 'prop')], ['Weekly card', ps.filter((p) => p.src === 'weekly')], ['All parlays', ps.filter((p) => p.legs)]];
-    const cats = [['Best value', 'value'], ['Safest', 'safest'], ['Big payout', 'payout'], ['Player bets', 'props']].map(([n, k]) => [n, ps.filter((p) => p.cat === k)]);
-    const conf = [['Very high (80+)', 0.8, 2], ['High (65–79)', 0.65, 0.8], ['Medium (55–64)', 0.55, 0.65], ['Low (under 55)', 0, 0.55]].map(([n, lo, hi]) => [n, ps.filter((p) => !p.legs && chanceOf(p) >= lo && chanceOf(p) < hi)]);
-    const tbl = (title, rows) => `<div class="card"><h3>${title}</h3><div class="tbl-wrap"><table><thead><tr><th></th><th class="r">Graded</th><th class="r">Won</th><th class="r">$10 each</th><th class="r">Return</th></tr></thead><tbody>${rows.map(([n, list]) => { const s = statsOf(list); return `<tr><td>${esc(n)}</td><td class="r num">${s.n}${s.pending ? ` <span class="hint">+${s.pending}</span>` : ''}</td><td class="r num">${s.n ? pct(s.w / s.n) : '—'}</td><td class="r num ${s.profit > 0 ? 'pos' : s.profit < 0 ? 'neg' : ''}">${s.n ? money(s.profit, true) : '—'}</td><td class="r num">${s.n ? (s.roi >= 0 ? '+' : '−') + pct(Math.abs(s.roi), 1) : '—'}</td></tr>`; }).join('')}</tbody></table></div></div>`;
-    const weekRows = [['Closest to a sure thing', 'lock'], ['Moonshots', 'moonshot'], ['50x cards', 'fifty'], ['Weekly favorites', 'favorite'], ['Weekly parlays', 'parlay']].map(([n, k]) => [n, ps.filter((p) => p.src === 'weekly' && p.cat === k)]);
-    html += tbl('Who picked it', groups) + tbl('By list', cats) + tbl('Weekly card', weekRows) + tbl('By confidence score', conf);
-    // calibration
-    const buckets = [[0, 0.4], [0.4, 0.55], [0.55, 0.7], [0.7, 0.85], [0.85, 1.01]];
-    const gp = ps.filter((p) => (p.res === 'won' || p.res === 'lost') && p.cat !== 'combo');
-    html += `<div class="card"><h3>Is it honest about its chances?</h3><p class="lede" style="font-size:14px">If the tool is well tuned, picks it gave a 70% chance should win about 70% of the time. The gold mark is what it expected; the green bar is what happened.</p><div class="tbl-wrap"><table><thead><tr><th>When it said</th><th class="r">Picks</th><th class="r">Expected</th><th class="r">Actually won</th><th></th></tr></thead><tbody>${buckets.map(([lo, hi]) => { const b = gp.filter((p) => { const q = p.src === 'ai' && p.aiProb ? p.aiProb : p.fair; return q >= lo && q < hi; }); const e = b.length ? b.reduce((a, p) => a + (p.src === 'ai' && p.aiProb ? p.aiProb : p.fair), 0) / b.length : null; const a = b.length ? b.filter((p) => p.res === 'won').length / b.length : null; return `<tr><td>${Math.round(lo * 100)}–${Math.min(100, Math.round(hi * 100))}%</td><td class="r num">${b.length}</td><td class="r num">${pct(e)}</td><td class="r num">${pct(a)}</td><td>${b.length ? `<div class="bar" aria-hidden="true"><i style="width:${Math.round(a * 100)}%"></i><u style="left:${Math.round(e * 100)}%"></u></div>` : ''}</td></tr>`; }).join('')}</tbody></table></div></div>`;
-    const recent = ps.slice().sort((a, b) => (b.start || '').localeCompare(a.start || '')).slice(0, 60);
-    html += `<div class="card"><h3>Recent picks</h3><div>${recent.map((p) => `<div class="bet"><div class="bet-top"><div class="n"><span class="pill ${p.res || 'pending'}">${p.res || 'waiting'}</span> ${p.src === 'ai' ? '<span class="pill ai">AI</span> ' : ''}<b>${esc(p.label)}</b><div class="s">${esc(LG[p.league]?.label || '')} · ${esc(p.gameLabel || '')} · ${esc(new Date(p.start).toLocaleDateString(undefined, { month: 'short', day: 'numeric' }))} · bought ${p.side} at ${cents(p.price)} · chance ${pct(p.src === 'ai' && p.aiProb ? p.aiProb : p.fair)}</div></div><div class="amt"><div class="p num ${pickProfit(p) > 0 ? 'pos' : pickProfit(p) < 0 ? 'neg' : ''}">${p.res ? money(pickProfit(p), true) : ''}</div></div></div></div>`).join('')}</div></div>`;
+    const who = [['Generated by you and friends', par.filter((p) => p.src === 'gen')], ['AI researcher', par.filter((p) => p.src === 'ai')], ['Weekly card', par.filter((p) => p.src === 'weekly')], ['Math', par.filter((p) => p.src === 'math')]].map(([n, l]) => [n, statsOf(l)]).filter(([, st]) => st.n || st.pending);
+    if (who.length) html += `<div class="card"><h3>Who picked them</h3>${who.map(([n, st]) => `<div class="row" style="justify-content:space-between;gap:10px;padding:6px 0;border-top:1px solid var(--line)"><span>${n}<div class="hint">${st.w} won · ${st.l} lost${st.pending ? ` · ${st.pending} waiting` : ''}</div></span><b class="num ${st.profit > 0 ? 'pos' : st.profit < 0 ? 'neg' : ''}">${st.n ? money(st.profit, true) : '—'}</b></div>`).join('')}</div>`;
+    const f = store.get('parF', 'all');
+    const list = par.filter((p) => f === 'all' || (f === 'won' && p.res === 'won') || (f === 'lost' && p.res === 'lost') || (f === 'waiting' && !p.res)).sort((a, b) => (b.start || '').localeCompare(a.start || '')).slice(0, 250);
+    html += `<div class="chips" role="group" aria-label="Show">${[['all', 'All parlays'], ['won', 'Winners'], ['lost', 'Losers'], ['waiting', 'Still playing']].map(([k, l]) => `<button class="chip" data-parf="${k}" aria-pressed="${f === k}">${l}</button>`).join('')}</div>`;
+    if (!list.length) html += `<div class="card empty"><strong>Nothing here yet</strong></div>`;
+    else {
+      resolveNames(list);
+      let last = '';
+      for (const p of list) { const dl = dayLabel(p.start); if (dl !== last) { if (last) html += '</div>'; html += `<div class="day"><h3>${esc(dl)}</h3>`; last = dl; } html += histRow(p); }
+      if (last) html += '</div>';
+    }
     el.innerHTML = html;
   }
   function chart(graded) {
@@ -1446,6 +1448,7 @@ document.getElementById('app').innerHTML = "<link rel=\"preconnect\" href=\"http
     const gb = t.closest('[data-gen]'); if (gb) { generateParlay().then(() => { renderPicks(); const card = document.querySelector('#p-picks .pick'); if (card) card.scrollIntoView({ behavior: 'smooth', block: 'center' }); }); return; }
     const hf = t.closest('[data-histf]'); if (hf) { store.set('histF', hf.dataset.histf); renderRecord(); return; }
     const rv = t.closest('[data-rview]'); if (rv) { recordView = rv.dataset.rview; store.set('recordView', recordView); renderRecord(); return; }
+    const pf = t.closest('[data-parf]'); if (pf) { store.set('parF', pf.dataset.parf); renderRecord(); return; }
     const rr = t.closest('[data-rrange]'); if (rr) { hitRange = rr.dataset.rrange; store.set('hitRange', hitRange); renderRecord(); return; }
     const rs = t.closest('[data-rsrc]'); if (rs) { hitSrc = rs.dataset.rsrc; store.set('hitSrc', hitSrc); renderRecord(); return; }
     const pm = t.closest('[data-pmode]'); if (pm) { parlayMode = pm.dataset.pmode; store.set('parlayMode', parlayMode); renderPicks(); return; }
