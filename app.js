@@ -57,7 +57,11 @@ document.getElementById('app').innerHTML = "<link rel=\"preconnect\" href=\"http
   const beta0 = (kind) => (kind === 'prop' ? 0.3 : 1);
   const betaFair = (m, r, beta) => clampP(sigm(logit(m) + beta * (logit(r) - logit(m))));
   const sideMid = (price, mid) => Math.max(0.02, Math.min(0.98, mid != null ? mid : price - 0.01)); // mid = Kalshi's chance for THIS side
-  function learnFair(lg, kind, price, mid, r) { const g = index?.learn?.groups?.[lg + '|' + kind]; return betaFair(sideMid(price, mid), r, g?.beta ?? beta0(kind)); }
+  // Early-season haircut (same as the data program): until a bet type has 20+ games of record, long shots are pulled down and favorites a little
+  const HAIRCUT = (f, games) => (f == null || games >= 20 ? f : f < 0.3 ? f * 0.65 : f > 0.65 ? 0.65 + (f - 0.65) * 0.7 : f);
+  function learnFair(lg, kind, price, mid, r) { const g = index?.learn?.groups?.[lg + '|' + kind]; return HAIRCUT(betaFair(sideMid(price, mid), r, g?.beta ?? beta0(kind)), g?.games ?? 0); }
+  // Hard pauses (same as the data program): baseball player bets through the playoffs, NBA player bets until the regular season
+  const hardPause = (lg, kind) => (lg === 'mlb' && kind === 'prop' && Date.now() < Date.parse('2026-11-05T00:00:00Z')) || (lg === 'nba' && kind === 'prop' && Date.now() < Date.parse('2026-10-21T00:00:00Z'));
   const Phi = (z) => { const x = Math.abs(z) / Math.SQRT2, t = 1 / (1 + 0.3275911 * x); const y = 1 - (((((1.061405429 * t - 1.453152027) * t) + 1.421413741) * t - 0.284496736) * t + 0.254829592) * t * Math.exp(-x * x); return 0.5 * (1 + (z < 0 ? -y : y)); };
   const rateWin = (G, side) => (G.ext?.rate ? Phi((side === 'home' ? G.ext.rate.mu : -G.ext.rate.mu) / G.ext.rate.sd) : null);
   const rateCover = (G, side, line) => (G.ext?.rate ? 1 - Phi((line - (side === 'home' ? G.ext.rate.mu : -G.ext.rate.mu)) / G.ext.rate.sd) : null);
@@ -82,7 +86,7 @@ document.getElementById('app').innerHTML = "<link rel=\"preconnect\" href=\"http
         const fair = raw == null ? null : lp != null ? raw : learnFair(G.league, kind, price, midY == null ? null : side === 'yes' ? midY : 1 - midY, r);
         const adj = raw == null ? 0 : fair - raw;
         const cost = price + fee(price);
-        const e = { key: row.t + '|' + side, ticker: row.t, side, kind, label: side === 'yes' ? yesLabel : noLabel, price, cost, fair, raw, adj, form, espn, rate, paused: learnGroup(G.league, kind)?.status === 'paused', edge: fair == null ? null : fair - cost, vol: row.vol || 0, model: lp != null ? 'live' : model, inGame: started, espnLive: lp != null && G.live.pHome != null, tail: !!row.tail, game: G.key, league: G.league, start: G.start, gameLabel: `${G.away.abbr || tn(G.away)} @ ${G.home.abbr || tn(G.home)}`, ...extra };
+        const e = { key: row.t + '|' + side, ticker: row.t, side, kind, label: side === 'yes' ? yesLabel : noLabel, price, cost, fair, raw, adj, form, espn, rate, paused: learnGroup(G.league, kind)?.status === 'paused' || hardPause(G.league, kind), edge: fair == null ? null : fair - cost, vol: row.vol || 0, model: lp != null ? 'live' : model, inGame: started, espnLive: lp != null && G.live.pHome != null, tail: !!row.tail, game: G.key, league: G.league, start: G.start, gameLabel: `${G.away.abbr || tn(G.away)} @ ${G.home.abbr || tn(G.home)}`, ...extra };
         out.push(e); mkt[e.key] = e;
       }
     };
@@ -269,7 +273,7 @@ document.getElementById('app').innerHTML = "<link rel=\"preconnect\" href=\"http
       const t = Date.parse(G.start);
       if (G.state !== 'pre' || t < now + 5 * 60e3 || t > lim || !passG(G)) continue;
       for (const e of G._e) {
-        if (e.fair == null || e.tail || e.paused || e.price < 0.05 || e.price > 0.95 || e.vol < 150) continue;
+        if (e.fair == null || e.tail || e.paused || e.price < 0.35 || e.fair < 0.45 || e.price > 0.95 || e.vol < 150) continue; // no long shots, no coin flips as legs
         if (e.model === 'stats' && !props) continue;
         out.push(e);
       }
@@ -352,7 +356,7 @@ document.getElementById('app').innerHTML = "<link rel=\"preconnect\" href=\"http
       if (o.league === 'mix' ? !(college || !isCollege(G.league)) : G.league !== o.league) continue;
       if (o.when === 'today' && dayKey(G.start) !== tk) continue;
       for (const e of G._e) {
-        if (e.fair == null || e.tail || e.paused || e.price < 0.05 || e.price > 0.95 || e.vol < 150) continue;
+        if (e.fair == null || e.tail || e.paused || e.price < 0.35 || e.fair < 0.45 || e.price > 0.95 || e.vol < 150) continue; // no long shots, no coin flips as legs
         if (e.model === 'stats' && !parlayProps) continue;
         out.push(e);
       }
@@ -554,7 +558,7 @@ document.getElementById('app').innerHTML = "<link rel=\"preconnect\" href=\"http
     for (const G of games) {
       const t = Date.parse(G.start);
       if (G.state !== 'pre' || t < now + 5 * 60e3 || t > lim || !passG(G)) continue;
-      for (const e of G._e) if (e.fair != null && !e.tail && !e.paused && e.price >= 0.05 && e.price <= 0.95 && e.vol >= (e.model === 'stats' ? 50 : 150)) out.push(e);
+      for (const e of G._e) if (e.fair != null && !e.tail && !e.paused && e.price >= 0.35 && e.price <= 0.95 && e.vol >= (e.model === 'stats' ? 50 : 150)) out.push(e);
     }
     return out;
   }
@@ -817,7 +821,7 @@ document.getElementById('app').innerHTML = "<link rel=\"preconnect\" href=\"http
   function tonightCard() {
     const now = Date.now(), lim = now + 24 * 3600e3; const soon = (iso) => { const t = Date.parse(iso); return t > now - 5 * 60e3 && t < lim; };
     const okey = (p) => { const e = live(p); return e ? outcomeKey(e) : p.ticker + '|' + p.side; }; const seen = new Set();
-    const singles = [...(index.picks?.safest || []), ...(index.picks?.value || []), ...(index.picks?.props || [])].filter((p) => soon(p.start) && !closedOf(p) && (live(p)?.fair ?? p.fair) != null).sort((a, b) => (live(b)?.fair ?? b.fair) - (live(a)?.fair ?? a.fair)).filter((p) => (seen.has(okey(p)) ? false : (seen.add(okey(p)), true))).slice(0, 3);
+    const singles = [...(index.picks?.safest || []), ...(index.picks?.value || []), ...(index.picks?.props || [])].filter((p) => soon(p.start) && !closedOf(p) && (live(p)?.fair ?? p.fair) != null && (live(p)?.price ?? p.price) >= 0.35 && !hardPause(p.league, p.kind)).sort((a, b) => (live(b)?.fair ?? b.fair) - (live(a)?.fair ?? a.fair)).filter((p) => (seen.has(okey(p)) ? false : (seen.add(okey(p)), true))).slice(0, 3);
     const R = latestResearch(); const isToday = !!R && now - Date.parse(R.at || R.date + 'T15:00:00Z') < 36 * 3600e3;
     const parlays = [...allPicks().filter((p) => p.cat === 'auto' && p.legs), ...(isToday ? (R.combos || []).filter((c) => c.legs) : [])].filter((c) => c.legs.every((l) => soon(l.start)) && !closedOf(c)).map((c) => ({ c, ch: c.aiProb ?? parlayLive(c).fair ?? 0 })).sort((a, b) => b.ch - a.ch);
     const sigs = new Set(); const top = parlays.filter(({ c }) => (sigs.has(genSig(c)) ? false : (sigs.add(genSig(c)), true))).slice(0, 2);
@@ -839,7 +843,7 @@ document.getElementById('app').innerHTML = "<link rel=\"preconnect\" href=\"http
     const src = pickList === 'ai' ? allPicks().filter((p) => p.src === 'ai' && !p.legs) : index.picks?.[pickList === 'sure' ? 'safest' : pickList] || [];
     const seen = new Set();
     const okey = (p) => { const e = live(p); return e ? outcomeKey(e) : p.ticker + '|' + p.side; };
-    const list = src.filter((p) => upcoming(p) && passPick(p)).sort((a, b) => conf(b) - conf(a)).filter((p) => (seen.has(okey(p)) ? false : (seen.add(okey(p)), true))).slice(0, 15);
+    const list = src.filter((p) => upcoming(p) && passPick(p) && (live(p)?.price ?? p.price) >= 0.35 && !hardPause(p.league, p.kind)).sort((a, b) => conf(b) - conf(a)).filter((p) => (seen.has(okey(p)) ? false : (seen.add(okey(p)), true))).slice(0, 15);
     if (pickList === 'ai' && R?.overview) html += `<div class="card"><div class="row" style="justify-content:space-between"><h3>Researcher's notes</h3><span class="pill ai">${R.date === todayKey() ? 'This morning' : 'From ' + esc(R.date)}</span></div><p>${esc(R.overview)}</p></div>`;
     html += list.length ? `<div class="card" style="padding-top:4px;padding-bottom:4px">${list.map((p, i) => pickRow(p, i, pickList === 'ai')).join('')}</div>` : `<div class="card empty"><strong>Nothing here right now</strong><span>${pickList === 'ai' ? 'The researcher posts picks each morning.' : 'Picks arrive with each price refresh. Try another list or another sport.'}</span></div>`;
     el.innerHTML = html;
