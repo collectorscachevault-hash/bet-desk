@@ -847,9 +847,10 @@ document.getElementById('app').innerHTML = "<link rel=\"preconnect\" href=\"http
   function renderPicks() {
     const el = $('p-picks');
     const R = latestResearch();
-    let html = `<div style="display:grid;gap:6px"><h2>Picks</h2><p class="lede">Single bets the tool likes. The big number is its confidence out of 100, then Kalshi's price and what it pays. Tap a pick for details, or “+ Parlay” to build with it. Every pick here is tracked in the Record.</p></div>`;
+    let html = '';
     if (!index) { html += `<div class="card empty"><strong>${dbState === 'off' ? 'Picks can’t load in this view' : 'Loading picks…'}</strong></div>`; el.innerHTML = html; return; }
     html += heroCard();
+    html += `<div style="display:grid;gap:6px;margin-top:6px"><h2>Picks</h2><p class="lede">Confidence out of 100, Kalshi's price, what it pays. Everything here is tracked in the Record.</p></div>`;
     html += ownCard();
     html += tonightCard();
     html += filterBar() + liveNowCard();
