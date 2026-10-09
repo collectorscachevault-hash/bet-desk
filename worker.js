@@ -41,6 +41,14 @@ export default {
       try { return Response.json({ at: Date.now(), m: await prices(list) }, { headers: { 'cache-control': 'no-store' } }); }
       catch (e) { return Response.json({ error: String(e.message || e) }, { status: 502, headers: { 'cache-control': 'no-store' } }); }
     }
+    if (url.pathname === '/api/diag') { // temporary: how does Kalshi answer from here?
+      const out = [];
+      for (const base of ['https://api.elections.kalshi.com/trade-api/v2', 'https://api.kalshi.com/trade-api/v2', 'https://trading-api.kalshi.com/trade-api/v2']) {
+        try { const r = await fetch(base + '/markets?tickers=KXNFLGAME-26OCT12SEAJAX-SEA&limit=1', { headers: { accept: 'application/json', 'user-agent': 'bet-desk/1.0' } }); out.push({ base, status: r.status, server: r.headers.get('server'), ray: r.headers.get('cf-ray'), mit: r.headers.get('cf-mitigated'), retry: r.headers.get('retry-after'), body: (await r.text()).slice(0, 160) }); }
+        catch (e) { out.push({ base, err: String(e.message || e) }); }
+      }
+      return Response.json(out);
+    }
     return env.ASSETS.fetch(req);
   },
 };
