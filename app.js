@@ -32,7 +32,7 @@ document.getElementById('app').innerHTML = "<link rel=\"preconnect\" href=\"http
   let research = {}, picklog = {}, genDocs = {}, bets = [], settings = { bankroll: null };
   let userCap = null, myId = null; const names = {}; // viewer identity and a cache of other people's display names
   let tab = store.get('tab', 'picks'), pickCat = store.get('pickCat', 'value');
-  if (!['picks', 'parlays', 'games', 'combo', 'record', 'mine'].includes(tab)) tab = 'picks';
+  tab = 'picks'; // every visit opens on the best parlay right now
   let parlaysView = store.get('parlaysView', 'today');
   if (pickCat === 'combos') pickCat = 'parlays';
   if (pickCat === 'plan' || !store.get('sureSeen', false)) { pickCat = 'sure'; store.set('pickCat', pickCat); store.set('sureSeen', true); }
@@ -786,6 +786,26 @@ document.getElementById('app').innerHTML = "<link rel=\"preconnect\" href=\"http
     return `<div class="trow"><button class="tmain" data-sheet="${esc(key)}"><span class="rk">${i + 1}</span><span class="n"><b>${esc(p.label)}</b><span>${esc(LG[p.league]?.label || '')} · ${esc(p.gameLabel || '')} · ${esc(startsIn(p.start))}</span>${closed ? '<span><span class="pill lost">Closed on Kalshi</span></span>' : ''}${ai && p.reason ? `<span>${esc(p.reason)}</span>` : ''}</span><span class="ch num"><b class="${c.cls}">${c.score}</b>${cents(price)} · ${price ? (1 / price).toFixed(1) : '—'}x${price ? `<span class="usd">$10 pays ${money(10 / price)}</span>` : ''}</span></button>
       <span class="acts2"><a class="addp kal" href="${esc(kalshiUrlFor(p.ticker))}" target="_blank" rel="noopener" aria-label="Bet on Kalshi: ${esc(p.label)}">Bet ↗</a><button class="addp" data-addleg="${esc(key)}" aria-pressed="${inCombo}" aria-label="${inCombo ? 'Remove from' : 'Add to'} parlay: ${esc(p.label)}">${inCombo ? '✓ Added' : '+ Parlay'}</button></span></div>`;
   }
+  // The first thing on screen: the best parlay to take right now. Logged parlays first (so it is tracked); if none are open, a fresh one.
+  let heroGen = null; // a generated fallback, kept until its legs start so the card does not change on every redraw
+  function heroPick() {
+    const now = Date.now(), lim = now + 48 * 3600e3;
+    const openLeg = (l) => { const e = mkt[l.ticker + '|' + l.side]; const t = Date.parse(l.start || e?.start || 0); return e && !e.inGame && t > now + 5 * 60e3 && t < lim && (e.price ?? l.price) >= 0.4 && (e.fair ?? l.fair ?? 0) >= 0.55 && e.kind !== 'prop'; };
+    const score = (c) => parlayLive(c).fair || 0, mult = (c) => 1 / (parlayLive(c).price || 1);
+    const logged = allPicks().filter((p) => p.legs && p.legs.length >= 2 && p.legs.length <= 3 && (p.src === 'ai' || p.src === 'math' || p.src === 'weekly') && p.legs.every(openLeg) && !closedOf(p) && mult(p) >= 1.6 && passPick(p)).sort((a, b) => score(b) - score(a));
+    if (logged.length) return { c: logged[0], who: logged[0].src === 'ai' ? 'AI researcher' : logged[0].src === 'weekly' ? 'Weekly card' : 'Math', tracked: true };
+    if (heroGen && heroGen.legs.every((l) => Date.parse(l.start) > now + 5 * 60e3 && mkt[l.key])) return { c: heroGen, who: 'Built just now', tracked: false };
+    const cands = genCandidates({ league: 'mix', when: 'any', n: 'any', min: 1.6 }).filter((c) => c.legs.length <= 3 && c.legs.every((l) => l.price >= 0.4 && l.fair >= 0.55));
+    heroGen = cands[0] || null;
+    return heroGen ? { c: heroGen, who: 'Built just now', tracked: false } : null;
+  }
+  function heroCard() {
+    const H = heroPick();
+    if (!H) return `<div class="card" style="border-color:var(--amber)"><h3 style="margin:0 0 4px">Best parlay right now</h3><div class="card empty" style="padding:10px"><strong>Nothing worth taking at the moment</strong><span>Games are under way or nothing clears the bar. New picks land around 8 AM.</span></div></div>`;
+    const { fair, price } = parlayLive(H.c);
+    return `<div class="card" style="border-color:var(--amber);display:grid;gap:8px"><div class="row" style="justify-content:space-between;align-items:baseline"><h3 style="margin:0">Best parlay right now</h3><span class="pill medium">${pct(fair)} chance · ${price ? (1 / price).toFixed(1) : '—'}x</span></div>
+      <div class="picks">${parlayCard(H.c, { who: H.who, ai: H.c.src === 'ai', aiProb: H.c.aiProb, reason: H.c.reason, title: 'Take this one', sub: H.tracked ? 'tracked in the Record' : 'tap “I bet this” to track it' })}</div></div>`;
+  }
   // "Own money": the bets the tool would take if the money were its own and it was told not to lose it. Strict, and allowed to pass.
   // Worked out from the logged picks, so the Record can score this strategy on its own.
   const ownChance = (p) => (p.src !== 'math' && p.aiProb ? p.aiProb : (live(p)?.fair ?? p.fair));
@@ -829,6 +849,7 @@ document.getElementById('app').innerHTML = "<link rel=\"preconnect\" href=\"http
     const R = latestResearch();
     let html = `<div style="display:grid;gap:6px"><h2>Picks</h2><p class="lede">Single bets the tool likes. The big number is its confidence out of 100, then Kalshi's price and what it pays. Tap a pick for details, or “+ Parlay” to build with it. Every pick here is tracked in the Record.</p></div>`;
     if (!index) { html += `<div class="card empty"><strong>${dbState === 'off' ? 'Picks can’t load in this view' : 'Loading picks…'}</strong></div>`; el.innerHTML = html; return; }
+    html += heroCard();
     html += ownCard();
     html += tonightCard();
     html += filterBar() + liveNowCard();
