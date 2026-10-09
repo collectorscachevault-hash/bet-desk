@@ -78,6 +78,7 @@ export default {
       if (!list.length) return json({ at: Date.now(), m: {} });
       try { return json({ at: Date.now(), m: await prices(env, list) }); } catch (e) { return json({ error: String(e.message || e) }, 502); }
     }
+    if (url.pathname === '/api/health') return json({ ok: true, keyId: !!(env.KALSHI_KEY_ID || '').trim(), privateKey: !!(env.KALSHI_PRIVATE_KEY || '').trim() }); // never the values, only whether they are set
     if (url.pathname === '/api/live-games') { try { return json(await liveGames()); } catch (e) { return json({ error: String(e.message || e) }, 502); } }
     return env.ASSETS.fetch(req);
   },

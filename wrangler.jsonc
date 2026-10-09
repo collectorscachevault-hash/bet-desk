@@ -2,6 +2,7 @@
   // Cloudflare settings: the folder is served as a static website, and worker.js answers /api/prices with live Kalshi numbers.
   "name": "bet-desk",
   "main": "worker.js",
+  "keep_vars": true,
   "compatibility_date": "2026-10-01",
   "assets": { "directory": "./", "binding": "ASSETS", "html_handling": "auto-trailing-slash" }
 }
