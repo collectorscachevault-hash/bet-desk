@@ -65,16 +65,17 @@ document.getElementById('app').innerHTML = "<link rel=\"preconnect\" href=\"http
       for (const side of ['yes', 'no']) {
         const price = side === 'yes' ? row.ya : row.na;
         if (row.closed || price == null || price <= 0 || price >= 1) continue;
-        const raw = row.fy == null || started ? null : side === 'yes' ? row.fy : 1 - row.fy;
+        const lp = started && G.live && !G.live.done && G.live.pHome != null && kind === 'winner' && extra.team ? (extra.team === 'home' ? G.live.pHome : 1 - G.live.pHome) : null; // in-game: ESPN's live win chance
+        const raw = lp != null ? (side === 'yes' ? lp : 1 - lp) : row.fy == null || started ? null : side === 'yes' ? row.fy : 1 - row.fy;
         const form = extra.l10 && extra.l10[1] >= 5 ? (side === 'yes' ? extra.l10[0] : extra.l10[1] - extra.l10[0]) / extra.l10[1] : null;
         const espn = extra.espnYes == null ? null : side === 'yes' ? extra.espnYes : 1 - extra.espnYes;
         const rate = extra.rateYes == null ? null : side === 'yes' ? extra.rateYes : 1 - extra.rateYes;
         const midY = row.ya == null ? null : row.yb != null && row.yb > 0 ? (row.ya + Math.max(row.yb, row.ya - 0.06)) / 2 : row.ya - 0.01;
         const r = raw == null ? null : side === 'yes' ? (row.fs ?? row.fy) : 1 - (row.fs ?? row.fy);
-        const fair = raw == null ? null : learnFair(G.league, kind, price, midY == null ? null : side === 'yes' ? midY : 1 - midY, r);
+        const fair = raw == null ? null : lp != null ? raw : learnFair(G.league, kind, price, midY == null ? null : side === 'yes' ? midY : 1 - midY, r);
         const adj = raw == null ? 0 : fair - raw;
         const cost = price + fee(price);
-        const e = { key: row.t + '|' + side, ticker: row.t, side, kind, label: side === 'yes' ? yesLabel : noLabel, price, cost, fair, raw, adj, form, espn, rate, paused: learnGroup(G.league, kind)?.status === 'paused', edge: fair == null ? null : fair - cost, vol: row.vol || 0, model, tail: !!row.tail, game: G.key, league: G.league, start: G.start, gameLabel: `${G.away.abbr || tn(G.away)} @ ${G.home.abbr || tn(G.home)}`, ...extra };
+        const e = { key: row.t + '|' + side, ticker: row.t, side, kind, label: side === 'yes' ? yesLabel : noLabel, price, cost, fair, raw, adj, form, espn, rate, paused: learnGroup(G.league, kind)?.status === 'paused', edge: fair == null ? null : fair - cost, vol: row.vol || 0, model: lp != null ? 'live' : model, inGame: started, tail: !!row.tail, game: G.key, league: G.league, start: G.start, gameLabel: `${G.away.abbr || tn(G.away)} @ ${G.home.abbr || tn(G.home)}`, ...extra };
         out.push(e); mkt[e.key] = e;
       }
     };
@@ -89,6 +90,8 @@ document.getElementById('app').innerHTML = "<link rel=\"preconnect\" href=\"http
     for (const id of index?.shards || []) for (const G of feed[id]?.games || []) { games.push(G); gameByKey[G.key] = G; }
     games.sort((a, b) => a.start.localeCompare(b.start));
     for (const G of games) {
+      const L = liveGames[G.league + ':' + G.espnId]; // ESPN says this game is under way (or just finished)
+      if (L) { G.live = L; if (L.done) { G.done = true; G.state = 'post'; } else { G.state = 'in'; G.detail = scoreLine(G, L); } }
       for (const v of Object.values(G.k || {})) for (const r of v) rowByT[r.t] = r;
       for (const P of G.props || []) for (const ln of P.lines || []) rowByT[ln.t] = ln;
       try { G._e = entries(G); } catch (err) { G._e = []; console.warn('skipped a game', G.key, err); }
@@ -100,6 +103,15 @@ document.getElementById('app').innerHTML = "<link rel=\"preconnect\" href=\"http
   // The page's data file is rebuilt on a schedule; in between, window.BETDESK_LIVE names a small service that
   // answers with current prices. Each refresh covers what is visible, so a view costs one or two calls.
   const LIVE = window.BETDESK_LIVE || ''; const liveAt = {}; let liveStamp = null, liveBusy = false;
+  const LIVE_GAMES = LIVE ? LIVE.replace(/[^/]*$/, 'live-games') : ''; let liveGames = {}; // league:espnId -> ESPN's in-progress status
+  const scoreLine = (G, L) => `${G.away.abbr || tn(G.away)} ${L.as} – ${G.home.abbr || tn(G.home)} ${L.hs}${L.detail ? ' · ' + L.detail : ''}`;
+  async function liveGamesRefresh() {
+    if (!LIVE_GAMES) return;
+    let j; try { const r = await fetch(LIVE_GAMES, { cache: 'no-store' }); if (!r.ok) return; j = await r.json(); } catch { return; }
+    const next = {}; for (const L of j.games || []) next[L.league + ':' + L.id] = L;
+    if (JSON.stringify(next) === JSON.stringify(liveGames)) return;
+    liveGames = next; if (games.length) { rebuild(); render(); }
+  }
   const liveClosed = (t) => !!rowByT[t]?.closed;
   const closedOf = (p) => (p.legs ? p.legs.some((l) => liveClosed(l.ticker)) : liveClosed(p.ticker));
   async function liveFetch(tickers, maxAge = 45000) {
@@ -132,6 +144,7 @@ document.getElementById('app').innerHTML = "<link rel=\"preconnect\" href=\"http
     liveFetch([...keys], force ? 0 : 45000).then((changed) => { liveBusy = false; if (changed) render(); else renderFresh(); }).catch((err) => { liveBusy = false; console.warn('live prices: refresh failed', err); });
   }
   if (LIVE) {
+    liveGamesRefresh(); setInterval(() => { if (document.visibilityState === 'visible') liveGamesRefresh(); }, 30000);
     // whenever the page redraws (new tab, filter, game or player opened), the bets now on screen get checked
     let liveT; new MutationObserver(() => { clearTimeout(liveT); liveT = setTimeout(() => liveRefresh(false), 250); }).observe(document.getElementById('app'), { childList: true, subtree: true });
     setInterval(() => { if (document.visibilityState === 'visible') liveRefresh(true); }, 60000);
@@ -598,6 +611,14 @@ document.getElementById('app').innerHTML = "<link rel=\"preconnect\" href=\"http
     h += `<p class="hint">Being right isn't the whole story: an 85% bet pays about 1.15x, so one loss wipes out about six wins. Most sure-thing bets on Kalshi cost a few cents more than they're worth, so each one shows how much; it skips any that cost more than 4¢ extra. Track record → Hit rates shows how often “80% sure” really wins.</p>`;
     return h;
   }
+  // In-progress games (shared website): live score plus the "to win" bets, with ESPN's in-game chance against Kalshi's live price
+  function liveNowCard() {
+    const list = games.filter((G) => G.state === 'in' && G.live && !G.live.done && passG(G));
+    if (!list.length) return '';
+    return `<div class="card"><div class="row" style="justify-content:space-between"><h3>Live now</h3><span class="pill high">${list.length} game${list.length === 1 ? '' : 's'} under way</span></div>
+      <p class="hint">In-game bets. The chance is ESPN’s live win model; the price is live from Kalshi. These are not in the parlay builders.</p>
+      ${list.map((G) => { const es = G._e.filter((e) => e.kind === 'winner' && e.side === 'yes').sort((a, b) => (b.fair ?? 0) - (a.fair ?? 0)); return `<button class="leg-row" data-game="${esc(G.key)}" style="margin-top:8px"><span class="n"><b>${esc(tn(G.away))} @ ${esc(tn(G.home))}</b><span>${esc(LG[G.league].label)} · <span class="neg">Live · ${esc(scoreLine(G, G.live))}</span></span></span><span class="num">›</span></button><div class="mlist">${es.map((e) => mrow(e)).join('') || '<p class="hint">No winner bet open right now.</p>'}</div>`; }).join('')}</div>`;
+  }
   function renderPicks() {
     const el = $('p-picks');
     const R = latestResearch(); const isToday = !!R && Date.now() - Date.parse(R.at || R.date + 'T15:00:00Z') < 36 * 3600e3; // fresh enough to show its picks
@@ -605,6 +626,7 @@ document.getElementById('app').innerHTML = "<link rel=\"preconnect\" href=\"http
     if (!index) { html += `<div class="card empty"><strong>${dbState === 'off' ? 'Picks can’t load in this view' : 'Loading picks…'}</strong></div>`; el.innerHTML = html; return; }
     html += filterBar();
     html += searchBox();
+    html += liveNowCard();
     if (R?.overview && pickCat !== 'week') html += `<div class="card"><div class="row" style="justify-content:space-between"><h3>Researcher's notes</h3><span class="pill ai">${R.date === todayKey() ? 'This morning' : 'From ' + esc(R.date)}</span></div><p>${esc(R.overview)}</p></div>`;
     html += `<div class="seg" role="group" aria-label="Pick type">${CATS.map(([k, l]) => `<button data-cat="${k}" aria-pressed="${pickCat === k}">${l}</button>`).join('')}</div><p class="lede" style="font-size:14px">${CAT_NOTE[pickCat]}</p>`;
     if (pickCat === 'sure') html += renderSure();
@@ -664,18 +686,24 @@ document.getElementById('app').innerHTML = "<link rel=\"preconnect\" href=\"http
     html += filterBar();
     if (shown.length) html += searchBox();
     if (!shown.length) html += `<div class="card empty"><strong>No upcoming games${sport !== 'all' ? ' for ' + esc(LG[sport].label) : ''}</strong><span>College basketball starts in November, and NBA player bets open when the season starts.</span></div>`;
-    let last = '';
-    for (const G of shown) {
-      const dk = dayKey(G.start);
-      if (dk !== last) { if (last) html += '</div>'; html += `<div class="day"><h3>${esc(dayLabel(G.start))}</h3>`; last = dk; }
+    const gameRow = (G) => {
       const w = G.k.game; const h = w.find((r) => r.side === 'home'), a = w.find((r) => r.side === 'away');
       const te = topEdge(G); const nProps = G.props.reduce((n, P) => n + P.lines.length, 0);
       const liveNow = G.state === 'in';
-      html += `<button class="game-row" data-game="${esc(G.key)}">
+      return `<button class="game-row" data-game="${esc(G.key)}">
         <span class="m">${esc(tn(G.away))} @ ${esc(tn(G.home))}</span>
-        <span class="px num">${a ? `${esc(G.away.abbr)} <b>${cents(a.ya)}</b>` : ''} ${h ? ` · ${esc(G.home.abbr)} <b>${cents(h.ya)}</b>` : ''}</span>
+        <span class="px num">${a && !a.closed ? `${esc(G.away.abbr)} <b>${cents(a.ya)}</b>` : ''} ${h && !h.closed ? ` · ${esc(G.home.abbr)} <b>${cents(h.ya)}</b>` : ''}</span>
         <span class="s">${esc(LG[G.league].label)} · ${liveNow ? `<span class="neg">Live · ${esc(G.detail)}</span>` : esc(timeOf(G.start))}${nProps ? ` · ${nProps} player bets` : ''}${te && te.edge >= 0.03 ? `<span class="badge">best edge +${Math.round(te.edge * 100)}¢</span>` : ''}</span>
       </button>`;
+    };
+    const liveList = shown.filter((G) => G.state === 'in');
+    if (liveList.length) html += `<div class="day"><h3>Live now</h3>${liveList.map(gameRow).join('')}</div>`;
+    let last = '';
+    for (const G of shown) {
+      if (G.state === 'in') continue;
+      const dk = dayKey(G.start);
+      if (dk !== last) { if (last) html += '</div>'; html += `<div class="day"><h3>${esc(dayLabel(G.start))}</h3>`; last = dk; }
+      html += gameRow(G);
     }
     if (last) html += '</div>';
     el.innerHTML = html;
@@ -686,7 +714,7 @@ document.getElementById('app').innerHTML = "<link rel=\"preconnect\" href=\"http
     let html = `<button class="back" data-back>‹ All games</button>
       <div class="ghead"><span class="m">${esc(G.away.display || tn(G.away))} @ ${esc(G.home.display || tn(G.home))}</span>
       <span class="s">${esc(LG[G.league].label)} · ${G.state === 'in' ? `<span class="neg">Live · ${esc(G.detail)}</span>` : esc(whenOf(G.start))}${b && G.state === 'pre' ? ` · Sportsbook: ${esc(G.home.abbr)} ${b.spread?.home?.line > 0 ? '+' : ''}${b.spread?.home?.line ?? '—'}, total ${b.total?.line ?? '—'}` : ''}</span></div>`;
-    if (G.state !== 'pre') html += `<p class="banner">This game has started. The prices below are from the last update and are out of date, so there are no estimates. Check the Kalshi app for live prices.</p>`;
+    if (G.state !== 'pre') html += LIVE ? (G.live && !G.live.done ? `<p class="banner"><b>Live: ${esc(scoreLine(G, G.live))}.</b> Prices below are live from Kalshi. The “to win” bets use ESPN’s in-game win chance; the other bets show a live price with no estimate.</p>` : `<p class="banner">This game has started. Prices below are live from Kalshi, but there are no estimates once a game is under way.</p>`) : `<p class="banner">This game has started. The prices below are from the last update and are out of date, so there are no estimates. Check the Kalshi app for live prices.</p>`;
     const X = G.ext || {}; const extras = [];
     if (X.espnWin) extras.push(`<b>ESPN's prediction model:</b> ${esc(tn(G.away))} ${pct(X.espnWin.away)}, ${esc(tn(G.home))} ${pct(X.espnWin.home)} to win`);
     if (X.espnWin && G.model?.pHome != null) { const pb = G.model.pBook ?? G.model.pHome; extras.push(`<b>Sportsbooks (cut removed):</b> ${esc(tn(G.away))} ${pct(1 - pb)}, ${esc(tn(G.home))} ${pct(pb)}`); if (G.model.blend > 1) extras.push(`<b>Blended view the tool uses:</b> ${esc(tn(G.away))} ${pct(1 - G.model.pHome)}, ${esc(tn(G.home))} ${pct(G.model.pHome)} — mostly the sportsbooks, with a little weight on ESPN's model${X.rate ? ' and our ratings' : ''}`); }
@@ -721,7 +749,7 @@ document.getElementById('app').innerHTML = "<link rel=\"preconnect\" href=\"http
     const c = confOf(e.fair);
     const ch = e.fair == null ? '<b>—</b>no estimate' : `<b class="${c.cls}">${c.score}</b>${c.label}${e.edge != null ? ` · <span class="${e.edge > 0 && !e.tail ? 'pos' : ''}">${edgeTxt(e.edge)}</span>` : ''}`;
     const did = e.model === 'stats' && e.l10?.[1] >= 3 ? ` · hit it in ${e.side === 'yes' ? e.l10[0] : e.l10[1] - e.l10[0]} of his last ${e.l10[1]}` : '';
-    return `<div class="mrow"><span class="rk">${i != null ? i + 1 : ''}</span><div class="n"><b>${esc(e.label)}</b><span>${e.model === 'stats' ? 'Player bet' : e.kind === 'winner' ? 'Winner' : e.kind === 'spread' ? 'Win margin' : 'Total'}${e.tail ? ' · far from the sportsbook line, rough estimate' : ''}${did} · pays ${(1 / e.price).toFixed(1)}x</span><span class="ch num">${ch}</span></div>
+    return `<div class="mrow"><span class="rk">${i != null ? i + 1 : ''}</span><div class="n"><b>${esc(e.label)}</b><span>${e.model === 'stats' ? 'Player bet' : e.kind === 'winner' ? 'Winner' : e.kind === 'spread' ? 'Win margin' : 'Total'}${e.model === 'live' ? ' · in-game, chance from ESPN’s live model' : e.inGame ? ' · in-game price' : ''}${e.tail ? ' · far from the sportsbook line, rough estimate' : ''}${did} · pays ${(1 / e.price).toFixed(1)}x</span><span class="ch num">${ch}</span></div>
       <div class="acts"><button class="mbtn" data-sheet="${esc(e.key)}"><span class="s">Buy ${e.side}</span><span class="p num">${cents(e.price)}</span></button><button class="addp" data-addleg="${esc(e.key)}" aria-pressed="${inCombo}" aria-label="${inCombo ? 'Remove from' : 'Add to'} parlay: ${esc(e.label)}">${inCombo ? '✓ Added' : '+ Parlay'}</button></div></div>`;
   }
   function playerBlock(G, name, ps) {
@@ -817,7 +845,7 @@ document.getElementById('app').innerHTML = "<link rel=\"preconnect\" href=\"http
     if (e.adj && Math.abs(e.adj) >= 0.01) pts.push(`Bets like this have been winning ${e.adj > 0 ? 'more' : 'less'} often than expected lately, so we nudged our number ${e.adj > 0 ? 'up' : 'down'} a little.`);
     if (e.paused) pts.push('Heads up: this kind of bet has been losing money lately, so the tool is leaving it out of its picks for now.');
     if (e.tail) pts.push('This line is far from where the sportsbooks set it, so our number is only a rough guess.');
-    if (G && G.state !== 'pre') pts.push('This game has already started — these were the numbers before kickoff.');
+    if (G && G.state !== 'pre') pts.push(LIVE ? (e.model === 'live' ? 'This game is under way. The chance comes from ESPN’s live in-game model and the price is live from Kalshi.' : 'This game is under way. The price is live from Kalshi, but there is no estimate for this bet once a game has started.') : 'This game has already started — these were the numbers before kickoff.');
     const summary = e.fair == null ? '' : `We think this wins <b>${tenths(e.fair)}</b>. ${priceWords(e)}`;
     return { pts, summary, conf: mathConfidence(e) };
   }
