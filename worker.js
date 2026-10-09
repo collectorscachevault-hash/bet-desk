@@ -8,7 +8,7 @@
 // KALSHI_KEY_ID and KALSHI_PRIVATE_KEY are set as secrets on this worker. The key can only read; it cannot place or change bets.
 const KALSHI = 'https://api.elections.kalshi.com';
 const TICKER = /^KX[A-Z0-9]+-[A-Z0-9-]+$/;
-const ESPN = { nfl: ['football/nfl', ''], cfb: ['football/college-football', '&groups=80'], nba: ['basketball/nba', ''], cbb: ['basketball/mens-college-basketball', '&groups=50'], mlb: ['baseball/mlb', ''] };
+const ESPN = { nfl: ['football/nfl', ''], cfb: ['football/college-football', '&groups=80'], nba: ['basketball/nba', ''], cbb: ['basketball/mens-college-basketball', '&groups=50'], mlb: ['baseball/mlb', ''], epl: ['soccer/eng.1', ''], laliga: ['soccer/esp.1', ''], bund: ['soccer/ger.1', ''], seriea: ['soccer/ita.1', ''], ligue1: ['soccer/fra.1', ''], mls: ['soccer/usa.1', ''], ucl: ['soccer/uefa.champions', ''] };
 const TTL = 20000; // a price answered within the last 20 s is reused, so many viewers cost one Kalshi call
 const cache = new Map(); // ticker -> { v, at }   (lives while this copy of the worker stays warm)
 let liveCache = null; // { at, games }
@@ -124,7 +124,7 @@ export default {
     }
     if (url.pathname === '/api/health') return json({ ok: true, keyId: !!(env.KALSHI_KEY_ID || '').trim(), privateKey: !!(env.KALSHI_PRIVATE_KEY || '').trim() }); // never the values, only whether they are set
     if (url.pathname === '/api/live-stats') {
-      const ids = [...new Set(String(url.searchParams.get('g') || '').split(',').map((x) => x.trim()).filter((x) => /^(nfl|cfb|nba|cbb|mlb):\d{5,12}$/.test(x)))].slice(0, 12);
+      const ids = [...new Set(String(url.searchParams.get('g') || '').split(',').map((x) => x.trim()).filter((x) => /^(nfl|cfb|nba|cbb|mlb|epl|laliga|bund|seriea|ligue1|mls|ucl):\d{5,12}$/.test(x)))].slice(0, 12);
       const games = {}; await Promise.all(ids.map(async (k) => { try { const [lg, id] = k.split(':'); const v = await gameStats(lg, id); if (v) games[k] = v; } catch {} }));
       return json({ at: Date.now(), games });
     }
