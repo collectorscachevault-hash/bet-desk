@@ -711,7 +711,8 @@ document.getElementById('app').innerHTML = "<link rel=\"preconnect\" href=\"http
       const rest = cands.filter((c) => c !== first && !sharesLeg(c, first) && chChance(c) >= 0.4);
       const second = rest.length ? chalPick(rest, first.res === 'won' ? S.bank / (first.cost || first.price) : S.bank, S.step + 1) : null;
       for (const c of [first, second].filter(Boolean)) {
-        const entry = { step: S.step, attempt: S.attempt, bankBefore: S.bank, pick: c, date: days[days.length - 1] };
+        const after = S.open.length; // the second parlay only counts once the first has hit; until then it is shown as the next step
+        const entry = { step: S.step + after, attempt: S.attempt, bankBefore: after ? Math.round(S.bank / (first.cost || first.price) * 100) / 100 : S.bank, pick: c, date: days[days.length - 1], ifHits: after ? S.step : null };
         if (c.res === 'won') { S.bank = Math.round(S.bank / (c.cost || c.price) * 100) / 100; S.peak = Math.max(S.peak || 0, S.bank); entry.bankAfter = S.bank; S.history.push(entry); S.step++; S.streak++; if (S.streak > S.best) { S.best = S.streak; S.bestAttempt = S.attempt; } if (S.bank >= CHAL.goal || S.step > CHAL.steps) { S.done = 'won'; break outer; } }
         else if (c.res === 'lost') { entry.bankAfter = 0; S.history.push(entry); endAttempt(S.step); break; }
         else { S.open.push(entry); if (S.open.length === 1 && c === first && second) { continue; } break outer; }
@@ -728,7 +729,7 @@ document.getElementById('app').innerHTML = "<link rel=\"preconnect\" href=\"http
       <div class="steps" aria-label="${stepsHit} of ${CHAL.steps} steps hit">${segs}</div>
       <div class="hint">Needs about <b>${S.need.toFixed(2)}x</b> per step to finish in ${CHAL.steps}; anything over ${S.need15.toFixed(2)}x still finishes within ${CHAL.max}. Up to two parlays a week when the Thursday card has two good ones.</div>`;
     if (S.done === 'won') h += `<div class="banner"><b>Done: $100 turned into ${money(S.bank)}.</b></div>`;
-    else if (S.open.length) h += `<div class="picks">${S.open.map((e) => parlayCard(e.pick, { title: `Step ${e.step} parlay`, who: 'Challenge', sub: `${money(e.bankBefore)} on it · wins ${money(e.bankBefore / (e.pick.cost || e.pick.price))}`, aiProb: e.pick.aiProb })).join('')}</div>`;
+    else if (S.open.length) h += `<div class="picks">${S.open.map((e) => parlayCard(e.pick, { title: `Step ${e.step} parlay`, who: 'Challenge', sub: `${e.ifHits ? `if step ${e.ifHits} hits, ` : ''}${money(e.bankBefore)} on it · wins ${money(e.bankBefore / (e.pick.cost || e.pick.price))}`, aiProb: e.pick.aiProb })).join('')}</div>`;
     else h += `<div class="card empty" style="padding:12px"><strong>The next parlay arrives with Thursday's card</strong><span>It takes the parlay with the best chance that pays enough to stay on pace.</span></div>`;
     const rec = `<b>Closest so far: ${S.best} in a row</b>${S.best ? ` (attempt ${S.bestAttempt})` : ''}${S.attempts.length ? ` · ${S.attempts.length} attempt${S.attempts.length === 1 ? '' : 's'} ended` : ''} · current run ${S.streak}`;
     h += `<div class="hint" style="border-top:1px solid var(--line);padding-top:8px">${rec}</div>`;
